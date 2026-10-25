@@ -1,0 +1,41 @@
+﻿param([string]$ScratchRoot=$PSScriptRoot)
+$ErrorActionPreference='Stop'
+$root=Join-Path $PSScriptRoot '..'
+$module=Join-Path $root 'scripts\TiboWatch.Platform.psm1'
+if(!(Test-Path -LiteralPath $module)){throw 'FAIL: Windows integration, durable state and task registration are missing.'}
+Import-Module (Join-Path $root 'scripts\TiboWatch.Core.psm1') -Force -DisableNameChecking
+Import-Module $module -Force -DisableNameChecking
+$scratch=Join-Path $ScratchRoot ('platform-test-'+[guid]::NewGuid().ToString('N'))
+$null=New-Item -ItemType Directory -Path $scratch
+try {
+    $path=Join-Path $scratch 'state.json'
+    $s=Read-TiboState $path
+    if($s.BaselineComplete){throw 'fresh baseline is incorrectly complete'}
+    $s.Seen=@('中文|https://x.com/thsottiaux/status/1'); Save-TiboState $s $path
+    $loaded=Read-TiboState $path
+    if($loaded.Seen[0] -cne $s.Seen[0]){throw 'UTF8 state did not round trip'}
+    $s.Pending=@([pscustomobject]@{Key='pending'}); Save-TiboState $s $path
+    if((Read-TiboState $path).Pending.Count -ne 1){throw 'atomic replacement lost pending notification'}
+    [IO.File]::WriteAllText($path,'broken JSON')
+    $rejected=$false; try{$null=Read-TiboState $path}catch{$rejected=$true}
+    if(!$rejected){throw 'corrupt state silently reset history'}
+    Write-Output 'PASS durable UTF8 state replacement and corrupt-state refusal'
+    $xml=New-TiboTaskXml 'D:\Folder with spaces\scripts\TiboWatch.ps1' 'S-1-5-21-123' ([datetimeoffset]'2026-10-25T03:00:00Z') 'D:\Stable Data'
+    $doc=[xml]$xml; $ns=New-Object Xml.XmlNamespaceManager $doc.NameTable; $ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+    if($doc.SelectSingleNode('//t:Repetition/t:Interval',$ns).InnerText -ne 'PT15M'){throw 'wrong polling interval'}
+    if($doc.SelectSingleNode('//t:LogonType',$ns).InnerText -ne 'InteractiveToken'){throw 'task could run without a desktop session'}
+    if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '-WindowStyle Hidden.*"D:\\Folder with spaces\\scripts\\TiboWatch.ps1"'){throw 'task script path is not safely quoted'}
+    if($doc.SelectSingleNode('//t:LogonTrigger/t:UserId',$ns).InnerText -ne 'S-1-5-21-123'){throw 'wrong logon identity'}
+    if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '-DataDirectory "D:\\Stable Data"'){throw 'task did not pin its physical data directory'}
+    Write-Output 'PASS 15-minute task XML with interactive identity and hidden quoted action'
+    $retry=Get-TiboRetryTime '120' ([datetimeoffset]'2026-10-25T03:00:00Z')
+    if([datetimeoffset]$retry -ne [datetimeoffset]'2026-10-25T03:02:00Z'){throw 'numeric retry-after incorrect'}
+    $retry=Get-TiboRetryTime 'Sun, 25 Oct 2026 03:05:00 GMT' ([datetimeoffset]'2026-10-25T03:00:00Z')
+    if([datetimeoffset]$retry -ne [datetimeoffset]'2026-10-25T03:05:00Z'){throw 'date retry-after incorrect'}
+    Write-Output 'PASS numeric and HTTP-date retry-after parsing'
+    Write-Output 'RESULT: 3 platform tests passed'
+} finally {
+    # Only files created in this exact, verified scratch directory are removed.
+    Get-ChildItem -LiteralPath $scratch -File | Remove-Item -Force
+    Remove-Item -LiteralPath $scratch
+}

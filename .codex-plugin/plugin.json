@@ -1,0 +1,18 @@
+{
+  "name": "tibo-reset-watch",
+  "version": "1.0.0",
+  "description": "免费监测 Tibo 的额度重置消息，并通过 Windows 桌面通知提醒。",
+  "author": { "name": "Personal tools" },
+  "license": "MIT",
+  "skills": "./skills/",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Tibo 额度重置提醒",
+    "shortDescription": "每 15 分钟检查重置消息，Windows 桌面提醒",
+    "longDescription": "通过 Codex Resets 免费社区接口监测 @thsottiaux 的额度重置消息，支持启停、状态、补查与测试通知。需要电脑开机并登录 Windows。数据可能延迟，不代表个人账号额度到账。",
+    "developerName": "Personal tools",
+    "category": "Productivity",
+    "capabilities": ["Read", "Interactive"],
+    "defaultPrompt": ["查看 Tibo 额度重置监测状态", "暂停 Tibo 提醒", "测试 Tibo 桌面通知"]
+  }
+}
