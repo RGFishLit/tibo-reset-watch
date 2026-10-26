@@ -40,7 +40,7 @@ function Invoke-TiboFxRequest([string]$Path,[hashtable]$Query) {
     $headers=@{Accept='application/json'}
     [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     try {
-        $r=Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent 'TiboResetWatch/1.1 (personal; 15 minute polling; github.com/RGFishLit/tibo-reset-watch)' -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 0 -ErrorAction Stop
+        $r=Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent 'TiboResetWatch/1.1 (personal; 30 minute polling; github.com/RGFishLit/tibo-reset-watch)' -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 0 -ErrorAction Stop
         return ($r.Content | ConvertFrom-Json -ErrorAction Stop)
     } catch {
         $response=Get-TiboField $_.Exception 'Response'
@@ -210,9 +210,9 @@ function New-TiboTaskXml([string]$ScriptPath,[string]$UserSid,[datetimeoffset]$N
     return @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
- <RegistrationInfo><Description>Tibo 额度重置提醒：每 15 分钟检查本人发帖和回复；主帖命中关键词才常驻提醒。</Description></RegistrationInfo>
+ <RegistrationInfo><Description>Tibo 额度重置提醒：每 30 分钟检查本人发帖和回复；主帖命中关键词才常驻提醒。</Description></RegistrationInfo>
  <Triggers>
-  <TimeTrigger><Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>$start</StartBoundary><Enabled>true</Enabled></TimeTrigger>
+  <TimeTrigger><Repetition><Interval>PT30M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>$start</StartBoundary><Enabled>true</Enabled></TimeTrigger>
   <LogonTrigger><Enabled>true</Enabled><UserId>$sid</UserId><Delay>PT15S</Delay></LogonTrigger>
  </Triggers>
  <Principals><Principal id="User"><UserId>$sid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>

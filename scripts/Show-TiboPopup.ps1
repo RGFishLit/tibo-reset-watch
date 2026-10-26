@@ -55,8 +55,8 @@ public class TiboNotificationForm : Form {
         $ack=@{ProcessId=$PID;StartTicks=$process.StartTime.ToUniversalTime().Ticks;WindowHandle=$form.Handle.ToInt64();Tag=[string]$event.Tag}
         [IO.File]::WriteAllText($ackFile,($ack|ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
     })
-    $form.Add_FormClosed({param($sender,$args)
-        if([string]$args.CloseReason -eq 'UserClosing'){
+    $form.Add_FormClosed({param($sender,$closeEventArgs)
+        if([string]$closeEventArgs.CloseReason -eq 'UserClosing'){
             $receipt=@{Closed=$true;Key=[string]$event.Key;Tag=[string]$event.Tag;At=[datetimeoffset]::UtcNow.ToString('o')}
             [IO.File]::WriteAllText(($MessageFile+'.closed.json'),($receipt|ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
         }

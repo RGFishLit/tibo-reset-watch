@@ -55,9 +55,8 @@ function ConvertTo-TiboThreadEvent($Post,$Root) {
     $id=Get-TiboFxPostId $Post;$rootId=Get-TiboFxPostId $Root
     $rootText=Get-TiboField $Root 'text'
     if($rootText -isnot [string]){throw 'Root post body is unavailable or malformed.'}
-    $pattern='(?i)\b(?:re-?set(?:s|ting|ted|ing|ed)?|reseting|banked\s+resets?|refill(?:s|ed|ing)?|(?:usage|rate)\s+limits?|quota)\b|额度重置|重置额度|额度恢复|备用重置|补充额度|重置'
-    if($rootText -notmatch $pattern){return $null}
-    $keyword=$Matches[0]
+    $keyword=Get-TiboRootKeyword $rootText
+    if(!$keyword){return $null}
     $author=[string](Get-TiboField (Get-TiboField $Post 'author') 'screen_name')
     if($author -cne 'thsottiaux'){return $null}
     $url=[string](Get-TiboField $Post 'url');$rootUrl=[string](Get-TiboField $Root 'url')

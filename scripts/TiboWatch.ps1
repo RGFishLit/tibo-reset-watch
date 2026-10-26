@@ -23,12 +23,12 @@ switch ($Action) {
         $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
         Register-TiboToastIdentity
         $appId=Get-TiboAppId
-        $config=@{AppId=$appId;IntervalMinutes=15;Version='1.1.0';Source='FxEmbed-v2'}
+        $config=@{AppId=$appId;IntervalMinutes=30;Version='1.1.1';Source='FxEmbed-v2'}
         [IO.File]::WriteAllText($configPath,($config | ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
         $xml=New-TiboTaskXml (Join-Path $PSScriptRoot 'TiboWatch.ps1') $identity.User.Value ([datetimeoffset]::Now) $DataDirectory
         $null=Register-ScheduledTask -TaskName $taskName -Xml $xml -Force
         Start-ScheduledTask -TaskName $taskName
-        [pscustomobject]@{Enabled=$true;Task=$taskName;IntervalMinutes=15;Message='已启用；首次成功检查只建立基线。'} | ConvertTo-Json
+        [pscustomobject]@{Enabled=$true;Task=$taskName;IntervalMinutes=30;Message='已启用；首次成功检查只建立基线。'} | ConvertTo-Json
     }
     'Pause' {
         $null=Disable-ScheduledTask -TaskName $taskName
@@ -48,7 +48,7 @@ switch ($Action) {
         }
         [pscustomobject]@{
             Plugin='Tibo 额度重置提醒';Enabled=($null -ne $task -and $task.State -ne 'Disabled')
-            TaskState=$(if($task){[string]$task.State}else{'NotInstalled'});IntervalMinutes=15
+            TaskState=$(if($task){[string]$task.State}else{'NotInstalled'});IntervalMinutes=30
             BaselineComplete=$s.BaselineComplete;LastSuccessfulCheck=$s.LastSuccessfulCheck
             LastAttemptAt=$s.LastAttemptAt;LastRunOutcome=$s.LastRunOutcome;SourceGeneratedAt=$s.LastDataGeneratedAt
             PendingNotifications=@($s.Pending).Count;LastError=$s.LastError;LastNotificationError=$s.LastNotificationError

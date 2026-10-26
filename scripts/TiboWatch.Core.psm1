@@ -51,10 +51,11 @@ function ConvertTo-TiboState($Object) {
     if($s.Source -cne 'FxEmbed-v2'){throw 'Unexpected monitoring source in state.'}
     return $s
 }
-function New-TiboSystemEvent([string]$Phase,[string]$Episode,[datetimeoffset]$Now) {
-    $key="system:$Phase|$Episode";$title='Tibo 监测已恢复';$text='已重新连接并继续检查主帖和 Tibo 的回复。'
-    if($Phase -eq 'outage'){$title='Tibo 监测暂时不可用';$text='连续 30 分钟无法检查时间线，恢复后会补查。'}
-    return [pscustomobject]@{Key=$key;Tag=(Get-TiboTag $key);Kind='system';Phase=$Phase;Sticky=$false;Title=$title;Text=$text;At=$Now.ToUniversalTime().ToString('o');Url='https://github.com/FxEmbed/FxEmbed';Source='FxEmbed';RootUrl=$null;RootText=$null;Keyword=$null}
+function Get-TiboRootKeyword($Text) {
+    if($Text -isnot [string]){return $null}
+    $pattern='(?i)\b(?:re-?set(?:s|ting|ted|ing|ed)?|reseting|banked\s+resets?|refill(?:s|ed|ing)?|(?:usage|rate)\s+limits?|quota)\b|额度重置|重置额度|额度恢复|备用重置|补充额度|重置'
+    if($Text -match $pattern){return $Matches[0]}
+    return $null
 }
 function Add-TiboPending($State,$Event) {
     if($State.Seen -contains $Event.Key){return}
@@ -81,7 +82,6 @@ function Invoke-TiboCycle {
             }
             $State.Deferred=@($snapshot.Deferred);$State.LastContextError=Get-TiboField $snapshot 'ContextError'
             if(!$wasBaseline){$State.BaselineComplete=$true;$State.BaselineAt=$Now.ToUniversalTime().ToString('o')}
-            if($State.OutageAlerted){Add-TiboPending $State (New-TiboSystemEvent 'recovery' $State.FailureSince $Now)}
             $State.LastSuccessfulCheck=$Now.ToUniversalTime().ToString('o');$State.LastDataGeneratedAt=$State.LastSuccessfulCheck
             $State.FailureSince=$null;$State.OutageAlerted=$false;$State.NextAttemptAt=$null;$State.LastError=$null
             $State.LastRunOutcome=$(if($State.Deferred.Count){'partial'}else{'ok'})
@@ -91,9 +91,8 @@ function Invoke-TiboCycle {
             if($_.Exception.Data.Contains('RetryAfterUtc')){$State.NextAttemptAt=[string]$_.Exception.Data['RetryAfterUtc']}
         }
     }
-    if($State.FailureSince -and !$State.OutageAlerted -and ($Now-[datetimeoffset]::Parse($State.FailureSince)).TotalMinutes -ge 30){
-        Add-TiboPending $State (New-TiboSystemEvent 'outage' $State.FailureSince $Now);$State.OutageAlerted=$true
-    }
+    # Strict quiet mode: operational failures and recovery are status/log data only.
+    $State.Pending=@($State.Pending|Where-Object{$_.Kind -in @('post','reply') -and (Get-TiboField $_ 'Sticky') -and (Get-TiboRootKeyword (Get-TiboField $_ 'RootText'))})
     & $Save $State
     $State.LastNotificationError=$null
     foreach($event in @($State.Pending)){
@@ -137,4 +136,4 @@ function New-TiboToastXml($Event) {
     $url=[Security.SecurityElement]::Escape($url)
     return '<toast activationType="protocol" launch="'+$url+'"'+$scenario+'><visual><binding template="ToastGeneric"><text>'+$title+'</text><text>'+$text+'</text><text>'+$footer+'</text></binding></visual><audio silent="true"/><actions>'+$actions+'</actions></toast>'
 }
-Export-ModuleMember -Function Get-TiboField,Get-TiboTag,New-TiboState,ConvertTo-TiboState,Invoke-TiboCycle,New-TiboToastXml,Test-TiboPostUrl
+Export-ModuleMember -Function Get-TiboField,Get-TiboTag,Get-TiboRootKeyword,New-TiboState,ConvertTo-TiboState,Invoke-TiboCycle,New-TiboToastXml,Test-TiboPostUrl

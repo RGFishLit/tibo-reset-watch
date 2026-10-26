@@ -22,12 +22,12 @@ try {
     Write-Output 'PASS durable UTF8 state replacement and corrupt-state refusal'
     $xml=New-TiboTaskXml 'D:\Folder with spaces\scripts\TiboWatch.ps1' 'S-1-5-21-123' ([datetimeoffset]'2026-10-25T03:00:00Z') 'D:\Stable Data'
     $doc=[xml]$xml; $ns=New-Object Xml.XmlNamespaceManager $doc.NameTable; $ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
-    if($doc.SelectSingleNode('//t:Repetition/t:Interval',$ns).InnerText -ne 'PT15M'){throw 'wrong polling interval'}
+    if($doc.SelectSingleNode('//t:Repetition/t:Interval',$ns).InnerText -ne 'PT30M'){throw 'wrong polling interval'}
     if($doc.SelectSingleNode('//t:LogonType',$ns).InnerText -ne 'InteractiveToken'){throw 'task could run without a desktop session'}
     if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '-WindowStyle Hidden.*"D:\\Folder with spaces\\scripts\\TiboWatch.ps1"'){throw 'task script path is not safely quoted'}
     if($doc.SelectSingleNode('//t:LogonTrigger/t:UserId',$ns).InnerText -ne 'S-1-5-21-123'){throw 'wrong logon identity'}
     if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '-DataDirectory "D:\\Stable Data"'){throw 'task did not pin its physical data directory'}
-    Write-Output 'PASS 15-minute task XML with interactive identity and hidden quoted action'
+    Write-Output 'PASS 30-minute task XML with interactive identity and hidden quoted action'
     $retry=Get-TiboRetryTime '120' ([datetimeoffset]'2026-10-25T03:00:00Z')
     if([datetimeoffset]$retry -ne [datetimeoffset]'2026-10-25T03:02:00Z'){throw 'numeric retry-after incorrect'}
     $retry=Get-TiboRetryTime 'Sun, 25 Oct 2026 03:05:00 GMT' ([datetimeoffset]'2026-10-25T03:00:00Z')
@@ -47,7 +47,17 @@ try {
     if(!$result.Closed -or (Test-Path -LiteralPath (Join-Path $popups ($event.Tag+'.json')))){throw 'Acknowledged message was redisplayed on retry'}
     Remove-Item -LiteralPath $receipt;Remove-Item -LiteralPath $popups
     Write-Output 'PASS manual acknowledgement survives a retry without a duplicate popup'
-    Write-Output 'RESULT: 5 platform tests passed'
+    $helperPath=Join-Path $root 'scripts\Show-TiboPopup.ps1'
+    $tokens=$null;$parseErrors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($helperPath,[ref]$tokens,[ref]$parseErrors)
+    $call=$ast.Find({param($n)$n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Member.Value -eq 'Add_FormClosed'},$true)
+    $handler=$call.Arguments[0].ScriptBlock.GetScriptBlock()
+    $event=[pscustomobject]@{Key='callback';Tag='callback'};$MessageFile=Join-Path $scratch 'callback.json'
+    & $handler $null ([pscustomobject]@{CloseReason='UserClosing'})
+    $closedPath=$MessageFile+'.closed.json'
+    if(!(Test-Path -LiteralPath $closedPath)){throw 'Actual FormClosed handler did not preserve manual acknowledgement'}
+    if(!(Get-Content -LiteralPath $closedPath -Raw|ConvertFrom-Json).Closed){throw 'Manual acknowledgement was not recorded'}
+    Write-Output 'PASS actual form-close callback persists manual acknowledgement'
+    Write-Output 'RESULT: 6 platform tests passed'
 } finally {
     # Only files created in this exact, verified scratch directory are removed.
     Get-ChildItem -LiteralPath $scratch -File | Remove-Item -Force

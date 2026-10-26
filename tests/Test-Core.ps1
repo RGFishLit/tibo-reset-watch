@@ -97,12 +97,12 @@ Test 'matched notifications persist before sending and retry across restart with
     Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
     Assert ($script:Sent.Count -eq 1 -and $s.Pending.Count -eq 0) 'retry failed or duplicated'
 }
-Test 'outage and recovery notify once while checkpoint remains unchanged on failure' {
+Test 'outage and recovery remain silent while preserving the failed checkpoint' {
     $s=Ready;$checkpoint=$s.LastSuccessfulCheck;$script:Sent=@()
     foreach($time in @('2026-10-26T06:00:00Z','2026-10-26T06:30:00Z','2026-10-26T06:35:00Z')){Invoke-TiboCycle -State $s -Fetch {throw 'network down'} -Notify {param($e)$script:Sent+=@($e)} -Save {} -Now ([datetimeoffset]$time)}
-    Assert ($s.LastSuccessfulCheck -eq $checkpoint -and $script:Sent.Count -eq 1) 'outage handling wrong'
+    Assert ($s.LastSuccessfulCheck -eq $checkpoint -and $script:Sent.Count -eq 0) 'outage handling wrong'
     $shot=Snapshot $s @();Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {} -Now ([datetimeoffset]'2026-10-26T06:40:00Z')
-    Assert ($script:Sent.Count -eq 2 -and !$s.FailureSince) 'recovery missing'
+    Assert ($script:Sent.Count -eq 0 -and !$s.FailureSince) 'recovery was not silent'
 }
 Test '429 retry-after pauses network while leaving pending alerts intact' {
     $s=Ready;$script:Calls=0
@@ -187,5 +187,12 @@ Test 'context request budget defers work fairly without blocking valid alerts' {
     $request={param($Path,$Query)if($Path -eq 'timeline'){return Page @()};$script:Attempted+=@([string]$Query.id);throw 'still missing'}
     $null=Get-TiboThreadSnapshot -State $s -Request $request -ContextRequestBudget 1 -Now ([datetimeoffset]'2026-10-26T06:15:00Z')
     Assert ($script:Attempted[0] -eq '151') 'previously unattempted context was starved'
+}
+Test 'stale operational and nonmatching queued messages are silently removed' {
+    $s=Ready
+    $s.Pending=@([pscustomobject]@{Key='old-outage';Kind='system';Sticky=$false},[pscustomobject]@{Key='old-unrelated';Kind='post';Sticky=$true;RootText='appearance settings'})
+    $shot=Snapshot $s @();$script:Sent=@()
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+    Assert ($script:Sent.Count -eq 0 -and $s.Pending.Count -eq 0) 'a non-keyword queued message caused a notification'
 }
 Write-Output "RESULT: $script:Passed thread tests passed"
