@@ -1,6 +1,6 @@
 {
   "name": "tibo-reset-watch",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "监测 Tibo 本人发帖和回复，主帖命中额度关键词才显示常驻提醒。",
   "author": { "name": "Personal tools" },
   "license": "MIT",

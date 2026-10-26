@@ -21,9 +21,10 @@ function Write-RunLog($Object) {
 switch ($Action) {
     'Enable' {
         $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+        $null=Install-TiboHiddenLauncher
         Register-TiboToastIdentity
         $appId=Get-TiboAppId
-        $config=@{AppId=$appId;IntervalMinutes=30;Version='1.1.1';Source='FxEmbed-v2'}
+        $config=@{AppId=$appId;IntervalMinutes=30;Version='1.1.2';Source='FxEmbed-v2'}
         [IO.File]::WriteAllText($configPath,($config | ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
         $xml=New-TiboTaskXml (Join-Path $PSScriptRoot 'TiboWatch.ps1') $identity.User.Value ([datetimeoffset]::Now) $DataDirectory
         $null=Register-ScheduledTask -TaskName $taskName -Xml $xml -Force

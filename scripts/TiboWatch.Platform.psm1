@@ -57,6 +57,15 @@ function Get-TiboAppId {
     return 'Codex.TiboResetWatch'
 }
 
+function Install-TiboHiddenLauncher([string]$DestinationDirectory=$PSScriptRoot) {
+    $null=New-Item -ItemType Directory -Path $DestinationDirectory -Force
+    $path=Join-Path $DestinationDirectory 'TiboWatch.Hidden.exe'
+    if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force}
+    Add-Type -Path (Join-Path $PSScriptRoot 'HiddenLauncher.cs') -OutputAssembly $path -OutputType WindowsApplication
+    if(!(Test-Path -LiteralPath $path)){throw 'No-console launcher compilation failed.'}
+    return $path
+}
+
 function Initialize-TiboNativePaths {
     if (!('TiboWatch.NativePaths' -as [type])) {
         Add-Type -TypeDefinition @'
@@ -101,17 +110,23 @@ function Register-TiboToastIdentity {
     $key='HKCU:\Software\Classes\AppUserModelId\Codex.TiboResetWatch'
     $null=New-Item -Path $key -Force
     $null=New-ItemProperty -Path $key -Name DisplayName -Value 'Tibo 额度重置提醒' -PropertyType String -Force
-    if(!(Test-Path -LiteralPath $shortcut)){
-        $shell=New-Object -ComObject WScript.Shell
+    if(Test-Path -LiteralPath $shortcut){
+        $catalog=New-Object -ComObject Shell.Application
+        try{
+            $item=$catalog.NameSpace($programs).ParseName('Tibo Reset Watch.lnk')
+            if($item.ExtendedProperty('System.AppUserModel.ID') -cne 'Codex.TiboResetWatch'){throw 'An unrelated shortcut already uses the Tibo name.'}
+        }finally{$null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($catalog)}
+    }
+    $shell=New-Object -ComObject WScript.Shell
         try{
             $link=$shell.CreateShortcut($shortcut)
-            $link.TargetPath=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            $link.Arguments='-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'TiboWatch.ps1')+'" -Action Status'
+            $link.TargetPath=Join-Path $PSScriptRoot 'TiboWatch.Hidden.exe'
+            $data=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+            $link.Arguments='"'+$data+'" Status'
             $link.Description='Tibo 额度重置提醒'
             $link.Save()
         }finally{if($shell){$null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}}
         [TiboWatch.ShortcutIdentity]::SetAppId($shortcut,'Codex.TiboResetWatch')
-    }
 }
 
 function Get-TiboActivePopup([string]$AckFile) {
@@ -143,8 +158,13 @@ function Show-TiboPersistentPopup($Event,[string]$DataDirectory,[ValidateRange(1
     elseif(Test-Path -LiteralPath $closedPath){Remove-Item -LiteralPath $closedPath -Force}
     [IO.File]::WriteAllText($message,($Event|ConvertTo-Json -Depth 12),(New-Object Text.UTF8Encoding $false))
     $helper=Join-Path $PSScriptRoot 'Show-TiboPopup.ps1'
-    $arguments='-NoLogo -NoProfile -NonInteractive -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$helper+'" -MessageFile "'+$message+'"'
-    $process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $start=New-Object Diagnostics.ProcessStartInfo
+    $start.FileName=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $start.Arguments='-NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "'+$helper+'" -MessageFile "'+$message+'"'
+    $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $process=[Diagnostics.Process]::Start($start)
+    $process.BeginOutputReadLine();$process.BeginErrorReadLine()
     $clock=[Diagnostics.Stopwatch]::StartNew()
     while($clock.ElapsedMilliseconds -lt $WaitMilliseconds){
         $ack=Get-TiboActivePopup $ackPath;if($ack){return $ack}
@@ -203,8 +223,9 @@ function Unregister-TiboToastIdentity {
 }
 
 function New-TiboTaskXml([string]$ScriptPath,[string]$UserSid,[datetimeoffset]$Now = [datetimeoffset]::Now,[string]$DataDirectory=(Join-Path $env:LOCALAPPDATA 'TiboResetWatch')) {
-    $command=[Security.SecurityElement]::Escape((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
-    $arguments=[Security.SecurityElement]::Escape('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$ScriptPath+'" -Action Check -DataDirectory "'+$DataDirectory+'"')
+    $launcher=Join-Path (Split-Path -Parent $ScriptPath) 'TiboWatch.Hidden.exe'
+    $command=[Security.SecurityElement]::Escape($launcher)
+    $arguments=[Security.SecurityElement]::Escape('"'+$DataDirectory+'" Check')
     $sid=[Security.SecurityElement]::Escape($UserSid)
     $start=$Now.ToString('yyyy-MM-ddTHH:mm:sszzz')
     return @"
@@ -222,4 +243,4 @@ function New-TiboTaskXml([string]$ScriptPath,[string]$UserSid,[datetimeoffset]$N
 "@
 }
 
-Export-ModuleMember -Function Read-TiboState,Save-TiboState,Get-TiboRetryTime,Invoke-TiboFxRequest,Get-TiboAppId,Show-TiboToast,Show-TiboPersistentPopup,Close-TiboPersistentPopups,New-TiboTaskXml,Resolve-TiboPhysicalPath,Register-TiboToastIdentity,Unregister-TiboToastIdentity
+Export-ModuleMember -Function Read-TiboState,Save-TiboState,Get-TiboRetryTime,Invoke-TiboFxRequest,Get-TiboAppId,Install-TiboHiddenLauncher,Show-TiboToast,Show-TiboPersistentPopup,Close-TiboPersistentPopups,New-TiboTaskXml,Resolve-TiboPhysicalPath,Register-TiboToastIdentity,Unregister-TiboToastIdentity

@@ -12,7 +12,7 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-TiboResetWatch.ps1
 ~~~
 
-安装脚本加入独立本地市场并注册当前用户的 Codex-TiboResetWatch 计划任务，保留其他 Codex 配置。程序与状态放在当前用户本地应用数据目录，固定物理路径以兼容 MSIX。插件市场源位于用户 Documents/Codex/plugin-marketplaces/tibo-reset-local。
+安装脚本加入独立本地市场并注册当前用户的 Codex-TiboResetWatch 计划任务，保留其他 Codex 配置。安装时用系统自带 .NET 编译器生成 GUI 启动器；任务及提醒助手在创建 PowerShell 子进程时禁用控制台分配，后台检查不会闪出 PowerShell 黑窗。程序与状态放在当前用户本地应用数据目录，固定物理路径以兼容 MSIX。插件市场源位于用户 Documents/Codex/plugin-marketplaces/tibo-reset-local。
 
 从 1.0 升级时保留已见帖子和未发送消息；新的时间线先建立基线，不推送历史。旧待发送消息会重新检查主帖后再决定是否提醒。安装后新开 Codex 聊天；插件列表未刷新时重启 Codex。
 
@@ -62,6 +62,7 @@ Status 显示检查时间、任务状态、通知队列、待查上下文及错�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Core.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Platform.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-PopupTimeout.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Headless.ps1
 ~~~
 
 数据来源：[FxEmbed 开源项目](https://github.com/FxEmbed/FxEmbed)，[官方 API 规范](https://github.com/FxEmbed/FxEmbed/blob/main/docs/specs/fxtwitter-openapi.json)。该免费第三方服务可能缓存、延迟、漏收或暂时不可用，不能保证完整覆盖所有 X 内容。本插件不隶属于 Tibo、OpenAI 或 FxEmbed。

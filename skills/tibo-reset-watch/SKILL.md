@@ -5,7 +5,7 @@ description: Use when the user asks to enable, pause, inspect, check, test, or u
 
 # Tibo 额度重置提醒
 
-Use the installed Windows watcher. Periodic monitoring is a Windows scheduled task every 30 minutes and never requires a recurring model call. Read this skill's `../../README.md` only for setup or troubleshooting.
+Use the installed Windows watcher. Periodic monitoring is a Windows scheduled task every 30 minutes and never requires a recurring model call. Its action uses the locally built GUI launcher TiboWatch.Hidden.exe; automatic checks and popup helpers forbid console allocation. Do not replace that task action with a direct powershell.exe action or rely on WindowStyle Hidden alone. Read this skill's `../../README.md` only for setup or troubleshooting.
 
 Run the following through a PowerShell shell; use Windows PowerShell 5.1 (`powershell.exe`), not `pwsh`, for the WinRT notification integration:
 

@@ -24,9 +24,9 @@ try {
     $doc=[xml]$xml; $ns=New-Object Xml.XmlNamespaceManager $doc.NameTable; $ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
     if($doc.SelectSingleNode('//t:Repetition/t:Interval',$ns).InnerText -ne 'PT30M'){throw 'wrong polling interval'}
     if($doc.SelectSingleNode('//t:LogonType',$ns).InnerText -ne 'InteractiveToken'){throw 'task could run without a desktop session'}
-    if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '-WindowStyle Hidden.*"D:\\Folder with spaces\\scripts\\TiboWatch.ps1"'){throw 'task script path is not safely quoted'}
+    if($doc.SelectSingleNode('//t:Command',$ns).InnerText -ne 'D:\Folder with spaces\scripts\TiboWatch.Hidden.exe'){throw 'task directly launches a console executable instead of the GUI launcher'}
     if($doc.SelectSingleNode('//t:LogonTrigger/t:UserId',$ns).InnerText -ne 'S-1-5-21-123'){throw 'wrong logon identity'}
-    if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '-DataDirectory "D:\\Stable Data"'){throw 'task did not pin its physical data directory'}
+    if($doc.SelectSingleNode('//t:Arguments',$ns).InnerText -notmatch '"D:\\Stable Data"'){throw 'task did not pin its physical data directory'}
     Write-Output 'PASS 30-minute task XML with interactive identity and hidden quoted action'
     $retry=Get-TiboRetryTime '120' ([datetimeoffset]'2026-10-25T03:00:00Z')
     if([datetimeoffset]$retry -ne [datetimeoffset]'2026-10-25T03:02:00Z'){throw 'numeric retry-after incorrect'}
