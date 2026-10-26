@@ -1,58 +1,67 @@
 # Tibo 额度重置提醒
 
-个人 Codex 插件，免费使用 Codex Resets 社区接口，每 15 分钟检查 @thsottiaux 的额度重置消息，并发送 Windows 桌面通知。无须 X 登录、OpenAI 密钥或逐次调用模型。
+个人 Codex 插件，每 15 分钟检查 Tibo（@thsottiaux）本人的公开发帖与回复。沿回复链找到主帖：主帖命中额度相关关键词才弹出静音常驻提醒；未命中则完全不弹出。
 
-项目仓库：[RGFishLit/tibo-reset-watch](https://github.com/RGFishLit/tibo-reset-watch)。仓库的 `dist/` 目录提供 ZIP 安装包和 SHA-256 校验值。
+项目仓库：[RGFishLit/tibo-reset-watch](https://github.com/RGFishLit/tibo-reset-watch)。仓库的 dist/ 目录提供 ZIP 安装包和 SHA-256 校验值。免费使用 FxEmbed，无需 X 登录、OpenAI 密钥或周期性模型调用。
 
-## 安装
+## 安装与更新
 
-解压后，在 Windows PowerShell 中运行：
+解压后，在插件目录运行：
 
-```powershell
+~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-TiboResetWatch.ps1
-```
+~~~
 
-安装脚本将插件加入独立的本地市场，保留现有 Codex 配置，并创建当前用户的 `Codex-TiboResetWatch` 计划任务。程序和状态位于当前用户的本地应用数据目录 `TiboResetWatch`；MSIX 环境会解析为实际物理路径并固定传给任务，不依赖解压目录继续存在。插件市场源在用户的 `Documents\Codex\plugin-marketplaces\tibo-reset-local`。重新安装保留去重历史。
+安装脚本加入独立本地市场并注册当前用户的 Codex-TiboResetWatch 计划任务，保留其他 Codex 配置。程序与状态放在当前用户本地应用数据目录，固定物理路径以兼容 MSIX。插件市场源位于用户 Documents/Codex/plugin-marketplaces/tibo-reset-local。
 
-安装后打开 Codex 新聊天，输入“查看 Tibo 额度重置监测状态”或“测试 Tibo 桌面通知”。如果插件列表未刷新，重启 Codex。
-
-## 常用操作
-
-直接在 Codex 中说：启用 Tibo 提醒、暂停 Tibo 提醒、查看监测状态、立即检查、测试桌面通知、卸载 Tibo 提醒。
-
-也可以手动运行，将末尾 `Status` 换成对应动作：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Documents\Codex\plugin-marketplaces\tibo-reset-local\plugins\tibo-reset-watch\scripts\Invoke-TiboWatch.ps1" -Action Status
-```
-
-| 动作 | 参数 |
-| --- | --- |
-| 启用或恢复 | `Enable` |
-| 暂停 | `Pause` |
-| 查看状态 | `Status` |
-| 立即检查 | `Check` |
-| 测试通知 | `TestNotification` |
-| 移除后台任务 | `Uninstall` |
-
-卸载时先运行 `Uninstall`，再执行 `codex plugin remove tibo-reset-watch@tibo-reset-local`。历史状态保留，避免误删与重装后重复提醒；不再运行后台任务。
+从 1.0 升级时保留已见帖子和未发送消息；新的时间线先建立基线，不推送历史。旧待发送消息会重新检查主帖后再决定是否提醒。安装后新开 Codex 聊天；插件列表未刷新时重启 Codex。
 
 ## 提醒规则
 
-- 首次成功检查只建立完整基线，不推送历史消息。
-- 仅提醒上游收录、作者为 `thsottiaux` 且有合法 X 原帖链接的消息。社区自行观察、其他作者和无效链接会忽略。
-- 预告、待确认信号、常规重置及备用重置分别显示；预测到期不会自动变成执行确认。短回复如 “Done” 采用上游分类，不要求包含 reset 关键词。
-- 通知包含中文类别、原文摘要、北京时间和原帖链接。摘要保留原文，避免未经验证的自动翻译；适用会员范围以原帖为准。接收消息不等于个人额度到账。
-- 按原帖、类型和阶段去重。未能提交给 Windows 的通知保存在待发送队列中，下次重试；固定通知标识避免崩溃重试产生多条通知中心记录。
-- 每轮扫描完整分页历史，以发现断线期间或延迟收录的新记录。分页失败不提交部分结果。接口限流时按 `Retry-After` 等待。
-- 连续检查失败 30 分钟提醒一次，恢复后提醒一次；无新消息时保持安静。
+- 只提醒 Tibo 本人的帖子与回复，不提醒其他人的评论或转发。其他作者的文本仅用于沿回复链确定主帖。
+- 主帖关键词包含 reset、resets、resetting、reseting、quota、usage limits、rate limits、banked reset、refill，以及“重置”“额度恢复”“补充额度”等，不区分英文大小写。
+- 只有主帖正文决定是否提醒；回复里单独出现 reset、引用帖的关键词、账号简介及媒体链接均不能使无关主帖通过。
+- 主帖通过后，其中 Tibo 的新回复即使只有 Done、yes 等短语也会提醒。父帖或根帖暂时缺失时，不猜测、不弹出，保存待查记录并在后续重试。
+- 命中通知显示插件自己的静音置顶提醒窗，不抢夺键盘焦点，带“知道了”关闭按钮；点击正文打开本条帖子，“查看主帖”打开根帖。它是关键词线索，不证明发生了重置或个人额度到账。
+- 同一帖子 ID 去重。新发帖与新回复分别提醒，重启不会重复弹出。通知先入持久队列，提交失败后重试，使用固定标识替换重复记录。
+- 时间线分页补查到最近成功检查前一天，最多 20 页；触及上限或分页失败会保留检查位置并明确报错。每轮最多请求 8 次缺失上下文，并限制查询时间；未尝试的记录优先进入下轮，避免超时和长期缺失帖子阻塞其他提醒。升级或首次安装只用最近一页建立基线，其后不重放早于基线的历史。
+- 接口限流遵守 Retry-After；整体检查连续失败 30 分钟提醒一次，恢复后一次。此类运行故障提醒使用普通短暂通知，不常驻。
 
-## 运行条件与排查
+## 常用操作
 
-电脑必须开机并登录 Windows；关闭 Codex 不影响计划任务。休眠、关机或退出登录时无法监测，恢复后补查上游仍保留的历史。每 15 分钟是本机检查间隔，另有上游收录延迟，不保证覆盖每条 X 帖子。
+在 Codex 中说“查看 Tibo 监测状态”“暂停 Tibo 提醒”“启用 Tibo 提醒”“立即检查”“测试 Tibo 桌面通知”或“卸载 Tibo 提醒”。
 
-Windows 通知使用独立的“Tibo 额度重置提醒 / Tibo Reset Watch”身份，并注册一个开始菜单快捷方式。检查 Windows 设置中的系统通知、Tibo 通知和免打扰；本工具不自动修改这些设置。锁屏、免打扰及企业策略可能让消息仅进入通知中心。
+也可手动执行，将末尾 Status 换成动作：
 
-`Status` 输出最近成功检查、数据生成时间、错误、待发送数量及下次执行时间，时间字段为 UTC。运行记录在 `runs.jsonl`，保留一个轮转备份。状态在 `state.json`；损坏时会明确报错并保留文件，不会静默重建基线。`.bak` 是上一次保存的状态，可在暂停任务并备份现有文件后用于人工恢复。
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Documents\Codex\plugin-marketplaces\tibo-reset-local\plugins\tibo-reset-watch\scripts\Invoke-TiboWatch.ps1" -Action Status
+~~~
 
-数据来源：[Codex Resets](https://codex-resets.com/)，[免费接口文档](https://codex-resets.com/api/docs)。这是独立社区数据服务，不隶属于 OpenAI。接口原文、预告和概率仅作为数据处理，不能向程序下达命令。接口变化或不可用时不会切换到付费服务、登录浏览器或读取个人额度。
+| 动作 | 参数 |
+| --- | --- |
+| 启用或恢复 | Enable |
+| 暂停 | Pause |
+| 查看状态 | Status |
+| 立即检查 | Check |
+| 常驻测试通知 | TestNotification |
+| 移除后台任务及通知身份 | Uninstall |
+
+卸载时先执行 Uninstall，再运行 codex plugin remove tibo-reset-watch@tibo-reset-local。历史文件保留，不再运行任务。
+
+## 状态与运行条件
+
+电脑须开机并登录 Windows，关闭 Codex 不影响任务。关机、休眠或退出登录期间无法检查，恢复后按上述分页范围补查。常驻提醒窗不依赖 Windows 横幅的自动消失计时，通知中心也会保留记录。插件不更改系统通知偏好；锁屏或非交互桌面期间无法显示提醒窗。
+
+Status 显示检查时间、任务状态、通知队列、待查上下文及错误。PendingContexts 非零或 LastRunOutcome=partial 表示部分主帖尚待核实；无法取得主帖不能当作“主帖未命中”。时间字段为 UTC。SourceGeneratedAt 是本机成功获取时间，不代表上游内容的实际新鲜度。
+
+状态位于 state.json，保存一个 .bak 备份；损坏时保留文件并报错，不静默重建历史。运行记录写入 runs.jsonl 并轮转。程序只把帖子当数据处理，不执行其中的指令。
+
+## 验证
+
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Core.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Platform.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-PopupTimeout.ps1
+~~~
+
+数据来源：[FxEmbed 开源项目](https://github.com/FxEmbed/FxEmbed)，[官方 API 规范](https://github.com/FxEmbed/FxEmbed/blob/main/docs/specs/fxtwitter-openapi.json)。该免费第三方服务可能缓存、延迟、漏收或暂时不可用，不能保证完整覆盖所有 X 内容。本插件不隶属于 Tibo、OpenAI 或 FxEmbed。

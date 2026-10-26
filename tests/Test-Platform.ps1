@@ -33,7 +33,21 @@ try {
     $retry=Get-TiboRetryTime 'Sun, 25 Oct 2026 03:05:00 GMT' ([datetimeoffset]'2026-10-25T03:00:00Z')
     if([datetimeoffset]$retry -ne [datetimeoffset]'2026-10-25T03:05:00Z'){throw 'date retry-after incorrect'}
     Write-Output 'PASS numeric and HTTP-date retry-after parsing'
-    Write-Output 'RESULT: 3 platform tests passed'
+    $badAck=Join-Path $scratch 'bad-window.json'
+    $process=[Diagnostics.Process]::GetCurrentProcess()
+    [IO.File]::WriteAllText($badAck,(@{ProcessId=$PID;StartTicks=$process.StartTime.ToUniversalTime().Ticks;WindowHandle=0}|ConvertTo-Json))
+    $active=& (Get-Module TiboWatch.Platform) {param($p)Get-TiboActivePopup $p} $badAck
+    if($active){throw 'An alive process without a visible owned window was accepted as delivery'}
+    Write-Output 'PASS popup acknowledgement requires a visible window owned by its process'
+    $popups=Join-Path $scratch 'popups';$null=New-Item -ItemType Directory -Path $popups
+    $event=[pscustomobject]@{Key='already-ack';Tag=(Get-TiboTag 'already-ack');Kind='post';Sticky=$true;Title='reset';Text='reset';At='2026-10-26T06:00:00Z';Url='https://x.com/thsottiaux/status/123'}
+    $receipt=Join-Path $popups ($event.Tag+'.json.closed.json')
+    [IO.File]::WriteAllText($receipt,(@{Closed=$true;Key=$event.Key}|ConvertTo-Json))
+    $result=Show-TiboPersistentPopup $event $scratch
+    if(!$result.Closed -or (Test-Path -LiteralPath (Join-Path $popups ($event.Tag+'.json')))){throw 'Acknowledged message was redisplayed on retry'}
+    Remove-Item -LiteralPath $receipt;Remove-Item -LiteralPath $popups
+    Write-Output 'PASS manual acknowledgement survives a retry without a duplicate popup'
+    Write-Output 'RESULT: 5 platform tests passed'
 } finally {
     # Only files created in this exact, verified scratch directory are removed.
     Get-ChildItem -LiteralPath $scratch -File | Remove-Item -Force

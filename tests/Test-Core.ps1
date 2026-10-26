@@ -1,152 +1,191 @@
-﻿param([string]$ModulePath = "$PSScriptRoot\..\scripts\TiboWatch.Core.psm1")
-$ErrorActionPreference = 'Stop'
-if (!(Test-Path -LiteralPath $ModulePath)) { throw 'FAIL: core module is missing; baseline and event filtering are not implemented.' }
-Import-Module $ModulePath -Force -DisableNameChecking
-$script:Passed = 0
-function Assert($Condition, [string]$Message) { if (!$Condition) { throw "ASSERT: $Message" } }
-function Test([string]$Name, [scriptblock]$Body) { & $Body; $script:Passed++; Write-Output "PASS $Name" }
-function Post([string]$Id = '100', [string]$Type = 'regular', [string]$At = '2026-10-25T01:00:00Z') {
-    return [pscustomobject]@{ id=$Id; reset_type=$Type; announced_at=$At; text='Done and dusted'; source=[pscustomobject]@{type='x_post';author='thsottiaux';url="https://x.com/thsottiaux/status/$Id"} }
+﻿$ErrorActionPreference='Stop'
+$root=Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $root 'scripts\TiboWatch.Core.psm1') -Force -DisableNameChecking
+if(!(Test-Path (Join-Path $root 'scripts\TiboWatch.Threads.psm1'))){throw 'FAIL: parent-thread keyword filtering and Tibo reply collection are not implemented.'}
+Import-Module (Join-Path $root 'scripts\TiboWatch.Threads.psm1') -Force -DisableNameChecking
+$script:Passed=0
+function Assert($Condition,[string]$Message){if(!$Condition){throw "ASSERT: $Message"}}
+function Test($Name,[scriptblock]$Body){& $Body;$script:Passed++;Write-Output "PASS $Name"}
+function Post($Id,$Text,$Parent=$null,$Author='thsottiaux',$Time=1792992000){
+    $reply=$null;if($Parent){$reply=@{status=[string]$Parent;screen_name='thsottiaux';url="https://x.com/thsottiaux/status/$Parent"}}
+    return [pscustomobject]@{type='status';id=[string]$Id;text=$Text;url="https://x.com/$Author/status/$Id";author=@{screen_name=$Author};created_timestamp=$Time;replying_to=$reply;reposted_by=$null;provider='twitter'}
 }
-function Status($Latest = $null, $Scheduled = $null, $Watch = $null) {
-    return [pscustomobject]@{ data=[pscustomobject]@{latest_reset=$Latest;scheduled_reset=$Scheduled;active_watch=$Watch;stats=@{total=0}};meta=@{api_version='v1';generated_at='2026-10-25T01:00:00Z'} }
+function Page($Posts,$Next=$null){return @{code=200;results=@($Posts);cursor=@{bottom=$Next}}}
+function Snapshot($State,$Posts,$Threads=@{}){
+    $script:Posts=@($Posts);$script:Threads=$Threads;$script:Requests=New-Object 'System.Collections.Generic.List[string]'
+    return Get-TiboThreadSnapshot -State $State -Request {param($Path,$Query)
+        $script:Requests.Add($Path)
+        if($Path -eq 'timeline'){return Page $script:Posts}
+        if($script:Threads.ContainsKey([string]$Query.id)){return $script:Threads[[string]$Query.id]}
+        throw 'upstream context unavailable'
+    } -Now ([datetimeoffset]'2026-10-26T06:00:00Z')
 }
-function Page($Items = @(), [bool]$More = $false, $Cursor = $null) {
-    return [pscustomobject]@{data=@($Items);pagination=[pscustomobject]@{has_more=$More;next_cursor=$Cursor};meta=@{api_version='v1';generated_at='2026-10-25T01:00:00Z'} }
-}
-function Run($State, $StatusBody, $Items = @(), [datetimeoffset]$Now = [datetimeoffset]'2026-10-25T02:00:00Z', [scriptblock]$Notify = {param($Item) $script:Sent.Add($Item)}) {
-    $script:ResponseStatus = $StatusBody
-    $script:ResponseItems = @($Items)
-    $script:Sent = New-Object 'System.Collections.Generic.List[object]'
-    $script:Saves = New-Object 'System.Collections.Generic.List[string]'
-    $fetch = {param($Path,$Query,$ETag) if($Path -eq 'status'){ return @{Body=$script:ResponseStatus;ETag='s1';NotModified=$false} }; return @{Body=(Page $script:ResponseItems);NotModified=$false} }
-    Invoke-TiboCycle -State $State -Fetch $fetch -Notify $Notify -Save {param($s) $script:Saves.Add(($s | ConvertTo-Json -Depth 20 -Compress))} -Now $Now
-}
+function Ready { $s=New-TiboState;$s.BaselineComplete=$true;$s.LastSuccessfulCheck='2026-10-26T05:30:00Z';return $s }
 
-Test 'first successful cycle creates baseline without historical notifications' {
-    $s=New-TiboState
-    Run $s (Status (Post)) @((Post))
-    Assert $s.BaselineComplete 'baseline was not established'
-    Assert ($script:Sent.Count -eq 0) 'historical records caused notification'
-    Assert ($s.LastSuccessfulCheck -eq '2026-10-25T02:00:00.0000000+00:00') 'success time missing'
+Test 'only main-post text controls keyword eligibility' {
+    $s=Ready
+    $p=@((Post 100 'Appearance settings'),(Post 101 'reset please' 100),(Post 102 'We are resetting usage limits'),(Post 103 'Done' 102))
+    $r=Snapshot $s $p
+    Assert ($r.Events.Count -eq 2) 'reply keyword incorrectly qualified an unrelated root'
+    Assert (@($r.Events|Where-Object {$_.Key -eq 'post:101'}).Count -eq 0) 'unrelated root generated alert'
+    Assert (@($r.Events|Where-Object {$_.Key -eq 'post:103' -and $_.Sticky}).Count -eq 1) 'short Tibo reply to matching root was lost'
 }
-Test 'new regular and banked posts notify exactly once across JSON reload' {
-    $s=New-TiboState; Run $s (Status) @()
-    $posts=@((Post '101' 'regular' '2026-10-25T02:01:00Z'),(Post '102' 'banked' '2026-10-25T02:02:00Z'))
-    Run $s (Status $posts[1]) $posts ([datetimeoffset]'2026-10-25T02:05:00Z')
-    Assert ($script:Sent.Count -eq 2) 'expected exactly 2 messages'
-    Assert (@($script:Sent | Where-Object Kind -eq 'banked').Count -eq 1) 'banked type missing'
-    $s=ConvertTo-TiboState ($s | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
-    Run $s (Status $posts[1]) $posts ([datetimeoffset]'2026-10-25T02:10:00Z')
-    Assert ($script:Sent.Count -eq 0) 'restart caused duplicates'
+Test 'only Tibo authored posts qualify even inside matching threads' {
+    $r=Snapshot (Ready) @((Post 104 'reset'),(Post 105 'great' 104 'someone'))
+    Assert ($r.Events.Count -eq 1 -and $r.Events[0].Key -eq 'post:104') 'other user generated alert'
 }
-Test 'unrelated authors observed sources and unsafe links are ignored' {
-    $s=New-TiboState; Run $s (Status) @()
-    $bad=@((Post '103'),(Post '104'),(Post '105'),(Post '106'),(Post '107'))
-    $bad[0].source.author='someone'; $bad[1].source.type='observed'
-    $bad[2].source.url='https://x.com.evil.test/thsottiaux/status/105'
-    $bad[3].source.url='https://x.com/someone/status/106'
-    $bad[4].source.url='javascript:alert(1)'
-    Run $s (Status) $bad
-    Assert ($script:Sent.Count -eq 0) 'untrusted source caused notification'
+Test 'nested replies follow parents to root rather than the immediate parent' {
+    $r=Snapshot (Ready) @((Post 106 'quota reset'),(Post 107 'question' 106 'someone'),(Post 108 'yes' 107))
+    $e=@($r.Events|Where-Object {$_.Key -eq 'post:108'})
+    Assert ($e.Count -eq 1 -and $e[0].RootUrl -eq 'https://x.com/thsottiaux/status/106') 'wrong root selected'
 }
-Test 'short context-dependent reset posts do not need a reset keyword' {
-    $s=New-TiboState; Run $s (Status) @()
-    $p=Post '108'; $p.text='Done'
-    Run $s (Status $p) @($p)
-    Assert ($script:Sent.Count -eq 1) 'upstream classified short post was dropped'
+Test 'quoted text and unrelated discussion cannot supply the keyword' {
+    $p=Post 109 'A nice day';$p|Add-Member quote (Post 110 'reset')
+    $r=Snapshot (Ready) @($p)
+    Assert ($r.Events.Count -eq 0) 'quoted post was treated as reply root'
 }
-Test 'scheduled announcement can later notify as execution using same post' {
-    $s=New-TiboState; Run $s (Status) @()
-    $p=Post '109'; $p | Add-Member status scheduled; $p | Add-Member scheduled_for '2026-10-25T03:00:00Z'
-    Run $s (Status $null $p) @()
-    Assert ($script:Sent.Count -eq 1 -and $script:Sent[0].Phase -eq 'scheduled') 'scheduled phase missing'
-    Run $s (Status $null $p) @() ([datetimeoffset]'2026-10-25T04:00:00Z')
-    Assert ($script:Sent.Count -eq 0) 'time passage incorrectly confirmed execution'
-    Run $s (Status $p) @($p) ([datetimeoffset]'2026-10-25T04:05:00Z')
-    Assert ($script:Sent.Count -eq 1 -and $script:Sent[0].Phase -eq 'recorded') 'execution transition was suppressed'
+Test 'missing parent chain is fetched from the thread endpoint' {
+    $child=Post 112 'done' 111;$parent=Post 111 'banked reset'
+    $r=Snapshot (Ready) @($child) @{'112'=@{code=200;status=$child;thread=@($parent,$child)}}
+    Assert ($r.Events.Count -eq 1 -and $r.Events[0].RootUrl -match '/111$') 'fetched root not used'
+    Assert ($script:Requests -contains 'thread') 'no context request made'
 }
-Test 'active watch is distinct from confirmation and expires without notification' {
-    $s=New-TiboState; Run $s (Status) @()
-    $w=[pscustomobject]@{level='strong';reset_chance_percent=99;forecast_window='today';observed_at='2026-10-25T02:01:00Z';expires_at='2026-10-25T03:00:00Z';text='One day';source=(Post '110').source}
-    Run $s (Status $null $null $w) @()
-    Assert ($script:Sent.Count -eq 1 -and $script:Sent[0].Phase -eq 'signal') 'watch phase missing'
-    Assert ($script:Sent[0].Title -notmatch '99|已到账|已完成') 'forecast promoted to fact'
-    $s=New-TiboState; Run $s (Status) @()
-    Run $s (Status $null $null $w) @() ([datetimeoffset]'2026-10-25T04:00:00Z')
-    Assert ($script:Sent.Count -eq 0) 'expired watch caused notification'
+Test 'unknown root is deferred while valid alerts remain deliverable' {
+    $r=Snapshot (Ready) @((Post 113 'done' 999),(Post 114 'reset today'))
+    Assert ($r.Events.Count -eq 1 -and $r.Deferred.Count -eq 1 -and $r.ContextError) 'unknown root blocked valid post or was silently accepted'
 }
-Test 'durable outbox is saved before notify and retries a failed notification' {
-    $s=New-TiboState; Run $s (Status) @()
-    Run $s (Status (Post '111')) @((Post '111')) ([datetimeoffset]'2026-10-25T02:05:00Z') {param($e) Assert ($script:Saves.Count -gt 0) 'not durable before notification'; throw 'toast unavailable'}
-    Assert ($s.Pending.Count -eq 1) 'failed message was lost'
-    Assert ($s.LastNotificationError -match 'toast unavailable') 'notification error missing'
-    $s=ConvertTo-TiboState ($s | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
-    Run $s (Status (Post '111')) @((Post '111')) ([datetimeoffset]'2026-10-25T02:10:00Z')
-    Assert ($script:Sent.Count -eq 1 -and $s.Pending.Count -eq 0) 'pending notification not retried'
+Test 'deferred reply resolves even after falling out of the current timeline' {
+    $s=Ready;$s.Deferred=@(@{Id='116';Silent=$false})
+    $child=Post 116 'landed' 115;$parent=Post 115 'Reset all paid plans'
+    $r=Snapshot $s @() @{'116'=@{code=200;status=$child;thread=@($parent,$child)}}
+    Assert ($r.Events.Count -eq 1 -and $r.Deferred.Count -eq 0) 'deferred post was not retried'
 }
-Test 'all history pages are consumed and backlog is delivered oldest first' {
-    $s=New-TiboState; Run $s (Status) @()
-    $script:Sent.Clear(); $script:PageCalls=0
-    $fetch={param($Path,$Query,$ETag) if($Path -eq 'status'){return @{Body=(Status);NotModified=$false}}; $script:PageCalls++; if(!$Query.cursor){return @{Body=(Page @((Post '113')) $true 'next_1');NotModified=$false}}; Assert ($Query.cursor -eq 'next_1') 'wrong cursor'; return @{Body=(Page @((Post '112')));NotModified=$false} }
-    Invoke-TiboCycle -State $s -Fetch $fetch -Notify {param($e)$script:Sent.Add($e)} -Save {} -Now ([datetimeoffset]'2026-10-25T04:00:00Z')
-    Assert ($script:PageCalls -eq 2 -and $script:Sent.Count -eq 2) 'pagination lost records'
-    Assert ($script:Sent[0].Url -match '/112$') 'backlog order wrong'
+Test 'circular or incomplete parent chains never create an alert' {
+    $r=Snapshot (Ready) @((Post 117 'reset' 118),(Post 118 'another' 117))
+    Assert ($r.Events.Count -eq 0 -and $r.Deferred.Count -eq 2) 'cycle was accepted as a root'
 }
-Test 'failed fetch retains checkpoint and alerts once after 30 minutes then recovers once' {
-    $s=New-TiboState; Run $s (Status) @(); $checkpoint=$s.LastSuccessfulCheck; $script:Sent.Clear()
-    $fail={throw 'network down'}; $notify={param($e)$script:Sent.Add($e)}
-    foreach($time in @('2026-10-25T02:05:00Z','2026-10-25T02:35:00Z','2026-10-25T02:40:00Z')) { Invoke-TiboCycle -State $s -Fetch $fail -Notify $notify -Save {} -Now ([datetimeoffset]$time) }
-    Assert ($s.LastSuccessfulCheck -eq $checkpoint) 'failed fetch advanced checkpoint'
-    Assert ($script:Sent.Count -eq 1 -and $script:Sent[0].Phase -eq 'outage') 'outage spam or missing alert'
-    Run $s (Status) @() ([datetimeoffset]'2026-10-25T02:45:00Z')
-    Assert ($script:Sent.Count -eq 1 -and $script:Sent[0].Phase -eq 'recovery') 'recovery notification missing'
+Test 'cursor pagination includes missing posts and rejects repeated cursors' {
+    $script:Calls=0
+    $r=Get-TiboThreadSnapshot -State (Ready) -Request {param($Path,$Query)
+        $script:Calls++;if(!$Query.cursor){return Page @((Post 119 'reset')) 'next'};return Page @((Post 120 'quota reset'))
+    } -Now ([datetimeoffset]'2026-10-26T06:00:00Z')
+    Assert ($r.Events.Count -eq 2 -and $script:Calls -eq 2) 'second page skipped'
+    $failed=$false
+    try{$null=Get-TiboThreadSnapshot -State (Ready) -Request {param($Path,$Query) Page @((Post 119 'reset')) 'next'} -Now ([datetimeoffset]'2026-10-26T06:00:00Z')}catch{$failed=$true}
+    Assert $failed 'cursor loop accepted'
 }
-Test 'rate limiting suppresses requests until retry-after and still retries queued notifications' {
-    $s=New-TiboState; Run $s (Status) @(); $script:Calls=0
-    $limited={ $ex=New-Object System.Exception 'HTTP 429'; $ex.Data['RetryAfterUtc']='2026-10-25T02:25:00Z'; throw $ex }
-    Invoke-TiboCycle -State $s -Fetch $limited -Notify {} -Save {} -Now ([datetimeoffset]'2026-10-25T02:05:00Z')
-    Assert ($s.NextAttemptAt -eq '2026-10-25T02:25:00Z') 'retry-after not saved'
-    Invoke-TiboCycle -State $s -Fetch {$script:Calls++;throw 'should not fetch'} -Notify {} -Save {} -Now ([datetimeoffset]'2026-10-25T02:10:00Z')
-    Assert ($script:Calls -eq 0) 'rate-limit ignored'
+Test 'unsupported API schemas fail rather than become an empty successful snapshot' {
+    $failed=$false;try{$null=Get-TiboThreadSnapshot -State (Ready) -Request {@{code=200;unexpected=@()}}}catch{$failed=$true}
+    Assert $failed 'invalid timeline schema accepted'
 }
-Test 'malformed responses fail without creating a false empty baseline' {
-    $s=New-TiboState
-    Run $s ([pscustomobject]@{unexpected='changed API'}) @()
-    Assert (!$s.BaselineComplete -and $s.LastError) 'invalid response treated as empty success'
+Test 'first baseline never sends old matching messages' {
+    $s=New-TiboState;$shot=Snapshot $s @((Post 121 'reset'));$script:Sent=@()
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {} -Now ([datetimeoffset]'2026-10-26T06:00:00Z')
+    Assert ($s.BaselineComplete -and $script:Sent.Count -eq 0 -and $s.Seen -contains 'post:121') 'baseline replayed history'
 }
-Test '304 status still scans history for late indexed posts' {
-    $s=New-TiboState; Run $s (Status) @(); $script:Sent.Clear()
-    $fetch={param($Path,$Query,$ETag) if($Path -eq 'status'){return @{NotModified=$true}}; return @{Body=(Page @((Post '114')));NotModified=$false} }
-    Invoke-TiboCycle -State $s -Fetch $fetch -Notify {param($e)$script:Sent.Add($e)} -Save {} -Now ([datetimeoffset]'2026-10-25T02:05:00Z')
-    Assert ($script:Sent.Count -eq 1) '304 skipped unseen historical record'
+Test 'negative posts never notify and remain marked processed' {
+    $s=Ready;$shot=Snapshot $s @((Post 122 'appearance'));$script:Sent=@()
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+    Assert ($script:Sent.Count -eq 0 -and $s.Seen -contains 'post:122') 'negative post notification or processing failure'
 }
-Test 'partial pagination failure commits no partial event set' {
-    $s=New-TiboState; Run $s (Status) @(); $before=$s.Seen.Count
-    $fetch={param($Path,$Query,$ETag) if($Path -eq 'status'){return @{Body=(Status);NotModified=$false}}; if(!$Query.cursor){return @{Body=(Page @((Post '115')) $true 'next_2');NotModified=$false}}; throw 'second page unavailable' }
-    Invoke-TiboCycle -State $s -Fetch $fetch -Notify {} -Save {} -Now ([datetimeoffset]'2026-10-25T02:05:00Z')
-    Assert ($s.Seen.Count -eq $before -and $s.Pending.Count -eq 0) 'partial data committed'
+Test 'matched notifications persist before sending and retry across restart without duplicates' {
+    $s=Ready;$shot=Snapshot $s @((Post 123 'reset'));$script:Saved=$false
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e) Assert $script:Saved 'outbox not durable';throw 'toast failed'} -Save {$script:Saved=$true}
+    Assert ($s.Pending.Count -eq 1 -and $s.LastNotificationError) 'failed toast lost'
+    $s=ConvertTo-TiboState ($s|ConvertTo-Json -Depth 30|ConvertFrom-Json);$script:Sent=@()
+    $shot=Snapshot $s @((Post 123 'reset'))
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+    Assert ($script:Sent.Count -eq 1 -and $s.Pending.Count -eq 0) 'retry failed or duplicated'
 }
-Test 'HTML or broken history data is rejected' {
-    $s=New-TiboState
-    $fetch={param($Path,$Query,$ETag) if($Path -eq 'status'){return @{Body=(Status);NotModified=$false}};return @{Body=@{data=@();meta=@{api_version='v1'}};NotModified=$false} }
-    Invoke-TiboCycle -State $s -Fetch $fetch -Notify {} -Save {} -Now ([datetimeoffset]'2026-10-25T02:00:00Z')
-    Assert (!$s.BaselineComplete -and $s.LastError) 'broken history accepted'
+Test 'outage and recovery notify once while checkpoint remains unchanged on failure' {
+    $s=Ready;$checkpoint=$s.LastSuccessfulCheck;$script:Sent=@()
+    foreach($time in @('2026-10-26T06:00:00Z','2026-10-26T06:30:00Z','2026-10-26T06:35:00Z')){Invoke-TiboCycle -State $s -Fetch {throw 'network down'} -Notify {param($e)$script:Sent+=@($e)} -Save {} -Now ([datetimeoffset]$time)}
+    Assert ($s.LastSuccessfulCheck -eq $checkpoint -and $script:Sent.Count -eq 1) 'outage handling wrong'
+    $shot=Snapshot $s @();Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {} -Now ([datetimeoffset]'2026-10-26T06:40:00Z')
+    Assert ($script:Sent.Count -eq 2 -and !$s.FailureSince) 'recovery missing'
 }
-Test 'notification XML escapes text and only launches validated source URLs' {
-    $e=ConvertTo-TiboEvent (Post '116') 'recorded' ([datetimeoffset]'2026-10-25T02:00:00Z')
-    $e.Text='a < b & "quoted"'; $xml=New-TiboToastXml $e
-    $doc=New-Object xml; $doc.LoadXml($xml)
-    Assert ($doc.toast.launch -eq 'https://x.com/thsottiaux/status/116') 'wrong launch URL'
-    Assert ($doc.SelectSingleNode('/toast/visual/binding/text[2]').InnerText -match 'a < b &') 'XML escaping lost text'
-    Assert ($doc.DocumentElement.InnerText -match 'Codex Resets' -and $doc.DocumentElement.InnerText -match '以原帖为准') 'attribution or scope missing'
+Test '429 retry-after pauses network while leaving pending alerts intact' {
+    $s=Ready;$script:Calls=0
+    Invoke-TiboCycle -State $s -Fetch {$e=New-Object Exception '429';$e.Data['RetryAfterUtc']='2026-10-26T07:00:00Z';throw $e} -Notify {} -Save {} -Now ([datetimeoffset]'2026-10-26T06:00:00Z')
+    Invoke-TiboCycle -State $s -Fetch {$script:Calls++} -Notify {} -Save {} -Now ([datetimeoffset]'2026-10-26T06:15:00Z')
+    Assert ($script:Calls -eq 0 -and $s.NextAttemptAt) 'rate-limit ignored'
 }
-Test 'emoji at truncation boundary and forbidden control characters cannot poison the queue' {
-    $ev=ConvertTo-TiboEvent (Post '117') 'recorded' ([datetimeoffset]'2026-10-25T02:00:00Z')
-    $ev.Text=('a'*216)+[char]::ConvertFromUtf32(0x1F680)+('b'*20)+[char]1
-    $doc=New-Object xml; $doc.LoadXml((New-TiboToastXml $ev))
-    $ev.Text='before'+[char]1+'after'
-    $doc.LoadXml((New-TiboToastXml $ev))
-    Assert ($doc.DocumentElement.InnerText -match 'beforeafter') 'control character removal damaged message'
+Test 'sticky notification has silent persistent scenario dismiss and original-root buttons' {
+    $shot=Snapshot (Ready) @((Post 124 'reset'),(Post 125 'Done' 124));$e=@($shot.Events|Where-Object {$_.Key -eq 'post:125'})[0]
+    $doc=[xml](New-TiboToastXml $e)
+    Assert ($doc.toast.scenario -eq 'alarm' -and $doc.toast.audio.silent -eq 'true') 'persistent scenario not silent'
+    Assert ($doc.SelectSingleNode('//action[@arguments="dismiss"]') -and $doc.SelectSingleNode('//action[@content="查看主帖"]')) 'dismiss or root action missing'
+    Assert ($doc.toast.launch -eq 'https://x.com/thsottiaux/status/125') 'notification opens wrong post'
 }
-Write-Output "RESULT: $script:Passed tests passed"
+Test 'emoji boundary XML and control characters remain safe' {
+    $e=(Snapshot (Ready) @((Post 126 'reset'))).Events[0];$e.Text=('a'*216)+[char]::ConvertFromUtf32(0x1F680)+('b'*20)+[char]1
+    $doc=[xml](New-TiboToastXml $e);Assert ($null -ne $doc.toast) 'bad XML'
+}
+Test 'old v1 state upgrades without losing seen history or pending messages' {
+    $legacy=@{SchemaVersion=1;BaselineComplete=$true;Seen=@('https://x.com/thsottiaux/status/127|regular|recorded');Pending=@(@{Key='old';Url='https://x.com/thsottiaux/status/128';Kind='regular'})}
+    $s=ConvertTo-TiboState ($legacy|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+    Assert (!$s.BaselineComplete -and $s.Seen -contains 'post:127' -and $s.Deferred[0].Id -eq '128' -and !$s.Deferred[0].Silent) 'migration lost history or queued context'
+}
+Test 'unseen posts older than the new-source baseline cannot replay on later pages' {
+    $s=Ready;$s.BaselineAt='2026-10-26T06:00:00Z'
+    $r=Snapshot $s @((Post 129 'reset from long ago' $null 'thsottiaux' 1792980000))
+    Assert ($r.Events.Count -eq 0) 'older unseen post replayed after baseline'
+}
+Test 'incomplete legacy state is rejected rather than reset' {
+    $failed=$false;try{$null=ConvertTo-TiboState ([pscustomobject]@{SchemaVersion=1})}catch{$failed=$true}
+    Assert $failed 'corrupt legacy state accepted'
+}
+Test 'unsafe original or root links cannot authorize a popup' {
+    $p=Post 130 'reset';$p.url='https://x.com.evil.test/thsottiaux/status/130'
+    $r=Snapshot (Ready) @($p)
+    Assert ($r.Events.Count -eq 0 -and $r.Deferred.Count -eq 1) 'unsafe original link accepted'
+    $root=Post 131 'reset';$root.url='javascript:alert(1)'
+    $r=Snapshot (Ready) @($root,(Post 132 'done' 131))
+    Assert ($r.Events.Count -eq 0) 'unsafe root link accepted'
+}
+Test 'bootstrap deferred context stays silent when it is later resolved' {
+    $s=New-TiboState;$shot=Snapshot $s @((Post 134 'done' 133));$script:Sent=@()
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+    $parent=Post 133 'reset';$child=Post 134 'done' 133
+    $shot=Snapshot $s @() @{'134'=@{code=200;status=$child;thread=@($parent,$child)}}
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+    Assert ($script:Sent.Count -eq 0 -and $s.Seen -contains 'post:134' -and $s.Deferred.Count -eq 0) 'old deferred post replayed after bootstrap'
+}
+Test 'legacy owed notification is revalidated and delivered during migration baseline' {
+    $legacy=@{SchemaVersion=1;BaselineComplete=$true;Seen=@('https://x.com/thsottiaux/status/136|regular|recorded');Pending=@(@{Key='old';Url='https://x.com/thsottiaux/status/136';Kind='regular'})}
+    $s=ConvertTo-TiboState ($legacy|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+    $shot=Snapshot $s @((Post 135 'quota reset'),(Post 136 'done' 135));$script:Sent=@()
+    Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+    Assert ($script:Sent.Count -eq 1 -and $script:Sent[0].Key -eq 'post:136') 'owed legacy post was dropped or unvalidated'
+}
+Test 'timeline request explicitly includes replies and system notices are transient' {
+    $null=Get-TiboThreadSnapshot -State (New-TiboState) -Request {param($Path,$Query)Assert ($Query.with_replies -eq '1') 'reply collection disabled';Page @()}
+    $event=[pscustomobject]@{Kind='system';Sticky=$true;Title='outage';Text='network';At='2026-10-26T06:00:00Z';Url='https://github.com/FxEmbed/FxEmbed'}
+    $doc=[xml](New-TiboToastXml $event)
+    Assert (!$doc.toast.HasAttribute('scenario')) 'operational notice became sticky'
+}
+Test 'missing or malformed root text is unknown and is retried after recovery' {
+    foreach($bad in @($null,42)){
+        $root=Post 140 'reset';$root.text=$bad
+        $s=Ready;$shot=Snapshot $s @($root,(Post 141 'Done' 140));$script:Sent=@()
+        Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+        Assert ($s.Deferred.Count -eq 2 -and $s.Seen -notcontains 'post:141') 'unknown root text was silently processed'
+        $root.text='reset';$shot=Snapshot $s @($root,(Post 141 'Done' 140))
+        Invoke-TiboCycle -State $s -Fetch {param($state,$now)$shot}.GetNewClosure() -Notify {param($e)$script:Sent+=@($e)} -Save {}
+        Assert ($script:Sent.Count -eq 2 -and $s.Deferred.Count -eq 0) 'recovered root text did not allow retry'
+    }
+}
+Test 'context request budget defers work fairly without blocking valid alerts' {
+    $s=Ready;$script:ContextCalls=0
+    $request={param($Path,$Query)
+        if($Path -eq 'timeline'){return Page @((Post 150 'Done' 900),(Post 151 'Done' 901),(Post 152 'reset now'))}
+        $script:ContextCalls++;throw 'context request timed out'
+    }
+    $r=Get-TiboThreadSnapshot -State $s -Request $request -ContextRequestBudget 1 -Now ([datetimeoffset]'2026-10-26T06:00:00Z')
+    Assert ($script:ContextCalls -eq 1 -and $r.Events.Count -eq 1 -and $r.Deferred.Count -eq 2) 'context work was not bounded'
+    $s.Deferred=$r.Deferred;$script:Attempted=@()
+    $request={param($Path,$Query)if($Path -eq 'timeline'){return Page @()};$script:Attempted+=@([string]$Query.id);throw 'still missing'}
+    $null=Get-TiboThreadSnapshot -State $s -Request $request -ContextRequestBudget 1 -Now ([datetimeoffset]'2026-10-26T06:15:00Z')
+    Assert ($script:Attempted[0] -eq '151') 'previously unattempted context was starved'
+}
+Write-Output "RESULT: $script:Passed thread tests passed"

@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'TiboWatch.Core.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'TiboWatch.Platform.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'TiboWatch.Threads.psm1') -Force -DisableNameChecking
 $taskName='Codex-TiboResetWatch'
 $statePath=Join-Path $DataDirectory 'state.json'
 $configPath=Join-Path $DataDirectory 'config.json'
@@ -22,7 +23,7 @@ switch ($Action) {
         $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
         Register-TiboToastIdentity
         $appId=Get-TiboAppId
-        $config=@{AppId=$appId;IntervalMinutes=15;Version='1.0.0'}
+        $config=@{AppId=$appId;IntervalMinutes=15;Version='1.1.0';Source='FxEmbed-v2'}
         [IO.File]::WriteAllText($configPath,($config | ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
         $xml=New-TiboTaskXml (Join-Path $PSScriptRoot 'TiboWatch.ps1') $identity.User.Value ([datetimeoffset]::Now) $DataDirectory
         $null=Register-ScheduledTask -TaskName $taskName -Xml $xml -Force
@@ -51,10 +52,11 @@ switch ($Action) {
             BaselineComplete=$s.BaselineComplete;LastSuccessfulCheck=$s.LastSuccessfulCheck
             LastAttemptAt=$s.LastAttemptAt;LastRunOutcome=$s.LastRunOutcome;SourceGeneratedAt=$s.LastDataGeneratedAt
             PendingNotifications=@($s.Pending).Count;LastError=$s.LastError;LastNotificationError=$s.LastNotificationError
+            PendingContexts=@($s.Deferred).Count;LastContextError=$s.LastContextError;MatchingRule='Root post keywords only; Tibo authored posts and replies; silent persistent popup'
             RetryAfter=$s.NextAttemptAt;WindowsNotifications=$notificationSetting
             NextRun=$(if($info){$info.NextRunTime.ToString('o')}else{$null})
             LastTaskResult=$(if($info){$info.LastTaskResult}else{$null})
-            Source='https://codex-resets.com/';DataDirectory=$DataDirectory
+            Source='https://api.fxtwitter.com/2/profile/thsottiaux/statuses?with_replies=1';DataDirectory=$DataDirectory
         } | ConvertTo-Json -Depth 6
     }
     'Check' {
@@ -66,11 +68,11 @@ switch ($Action) {
             $s=Read-TiboState $statePath
             if(!(Test-Path -LiteralPath $configPath)){throw 'Run the installer or Enable first.'}
             $cfg=Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $fetch={param($path,$query,$etag) Invoke-TiboRequest $path $query $etag}
-            $notify={param($event) Show-TiboToast $event $cfg.AppId}
+            $fetch={param($state,$now) Get-TiboThreadSnapshot -State $state -Now $now -Request {param($path,$query) Invoke-TiboFxRequest $path $query}}
+            $notify={param($event) Show-TiboToast $event $cfg.AppId $DataDirectory}
             $save={param($state) Save-TiboState $state $statePath}
             Invoke-TiboCycle -State $s -Fetch $fetch -Notify $notify -Save $save
-            $result=[pscustomobject]@{At=$s.LastAttemptAt;Result=$s.LastRunOutcome;Pending=@($s.Pending).Count;Error=$s.LastError;NotificationError=$s.LastNotificationError}
+            $result=[pscustomobject]@{At=$s.LastAttemptAt;Result=$s.LastRunOutcome;Pending=@($s.Pending).Count;PendingContexts=@($s.Deferred).Count;Error=$s.LastError;ContextError=$s.LastContextError;NotificationError=$s.LastNotificationError}
             Write-RunLog $result
             $result | ConvertTo-Json
             if($s.LastRunOutcome -eq 'error' -or $s.LastNotificationError){exit 1}
@@ -84,16 +86,17 @@ switch ($Action) {
         $cfg=Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $s=Read-TiboState $statePath
         $ev=$null
-        if($s.CachedStatus){$ev=ConvertTo-TiboEvent (Get-TiboField (Get-TiboField $s.CachedStatus 'data') 'latest_reset') 'recorded' ([datetimeoffset]::UtcNow)}
-        if(!$ev){$ev=[pscustomobject]@{Key='test';Tag='tibotest';Kind='system';Phase='test';Title='测试';Text='测试';At=[datetimeoffset]::UtcNow.ToString('o');Url='https://codex-resets.com/'}}
-        $ev.Title='Tibo 提醒测试（不代表有新重置）';$ev.Text='通知测试：点击打开消息原帖。监测每 15 分钟运行。'
+        if($s.LastMatchedPost){$ev=$s.LastMatchedPost}
+        if(!$ev){$ev=[pscustomobject]@{Key='test';Tag='tibotest';Kind='post';Phase='test';Title='测试';Text='测试';At=[datetimeoffset]::UtcNow.ToString('o');Url='https://x.com/thsottiaux/status/2114588174249071102';RootUrl='https://x.com/thsottiaux/status/2114588174249071102';Sticky=$true}}
+        $ev.Title='Tibo 常驻提醒测试（不代表有新重置）';$ev.Text='规则测试：主帖命中关键词才常驻。点击“知道了”关闭；未命中时完全不弹出。'
         $ev.Tag='tibotest'
-        Show-TiboToast $ev $cfg.AppId
-        [pscustomobject]@{SubmittedToWindows=$true;Tag=$ev.Tag;ClickTarget=$ev.Url;Message='测试通知已交给 Windows；是否弹出仍受系统通知设置影响。'} | ConvertTo-Json
+        Show-TiboToast $ev $cfg.AppId $DataDirectory
+        [pscustomobject]@{SubmittedToWindows=$true;Tag=$ev.Tag;Sticky=$true;ClickTarget=$ev.Url;RootTarget=$ev.RootUrl;Message='常驻测试窗已显示，点击“知道了”关闭；此测试不代表有新重置。'} | ConvertTo-Json
     }
     'Uninstall' {
         $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if($task){Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}
+        Close-TiboPersistentPopups $DataDirectory
         Unregister-TiboToastIdentity
         [pscustomobject]@{TaskRemoved=$true;Message='后台任务已移除，历史状态保留。可在 Codex 插件设置中移除插件。';DataDirectory=$DataDirectory} | ConvertTo-Json
     }

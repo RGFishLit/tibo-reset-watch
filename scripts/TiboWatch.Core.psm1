@@ -1,192 +1,140 @@
 ﻿Set-StrictMode -Version 2.0
 
-function Get-TiboField($Object, [string]$Name) {
-    if ($null -eq $Object) { return $null }
-    if ($Object -is [System.Collections.IDictionary]) { return ,($Object[$Name]) }
-    $p = $Object.PSObject.Properties[$Name]
-    if ($null -ne $p) { return ,($p.Value) }
+function Get-TiboField($Object,[string]$Name) {
+    if($null -eq $Object){return $null}
+    if($Object -is [Collections.IDictionary]){return ,($Object[$Name])}
+    $p=$Object.PSObject.Properties[$Name];if($null -ne $p){return ,($p.Value)}
     return $null
 }
-
+function Get-TiboTag([string]$Key) {
+    $hash=[Security.Cryptography.SHA256]::Create()
+    try{return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($Key)))).Replace('-','').Substring(0,16).ToLowerInvariant()}
+    finally{$hash.Dispose()}
+}
 function New-TiboState {
     return @{
-        SchemaVersion=1; BaselineComplete=$false; BaselineAt=$null; Seen=@(); Pending=@()
-        LastAttemptAt=$null; LastSuccessfulCheck=$null; LastDataGeneratedAt=$null
-        FailureSince=$null; OutageAlerted=$false; NextAttemptAt=$null
-        StatusEtag=$null; CachedStatus=$null; LastError=$null; LastNotificationError=$null
-        LastRunOutcome='never'
+        SchemaVersion=2;Source='FxEmbed-v2';BaselineComplete=$false;BaselineAt=$null
+        Seen=@();Pending=@();Deferred=@();LastMatchedPost=$null
+        LastAttemptAt=$null;LastSuccessfulCheck=$null;LastDataGeneratedAt=$null
+        FailureSince=$null;OutageAlerted=$false;NextAttemptAt=$null
+        LastError=$null;LastContextError=$null;LastNotificationError=$null;LastRunOutcome='never'
     }
 }
-
 function ConvertTo-TiboState($Object) {
-    if ((Get-TiboField $Object 'SchemaVersion') -ne 1) { throw 'Unsupported or corrupt state file. Refusing to reset notification history.' }
-    $s = New-TiboState
-    foreach ($key in @($s.Keys)) {
-        if ($null -eq $Object.PSObject.Properties[$key] -and !($Object -is [System.Collections.IDictionary] -and $Object.Contains($key))) {
-            throw "State file is missing $key. Refusing to reset notification history."
+    $version=Get-TiboField $Object 'SchemaVersion'
+    if($version -eq 1){
+        if((Get-TiboField $Object 'Seen') -isnot [Array] -or (Get-TiboField $Object 'Pending') -isnot [Array] -or (Get-TiboField $Object 'BaselineComplete') -isnot [bool]){throw 'Corrupt legacy state; notification history was not reset.'}
+        # New source needs a fresh baseline; preserve seen IDs and owed alerts.
+        $s=New-TiboState
+        foreach($key in @('LastSuccessfulCheck','LastAttemptAt','LastNotificationError')){$s[$key]=Get-TiboField $Object $key}
+        $legacySeen=Get-TiboField $Object 'Seen'
+        foreach($key in $legacySeen){
+            if([string]$key -match '^https://x\.com/thsottiaux/status/([0-9]+)\|'){$s.Seen+=@('post:'+$Matches[1])}
         }
-        $s[$key] = Get-TiboField $Object $key
+        $legacyPending=Get-TiboField $Object 'Pending'
+        foreach($event in $legacyPending){
+            $url=[string](Get-TiboField $event 'Url')
+            if($url -match '^https://x\.com/thsottiaux/status/([0-9]+)$'){
+                $id=$Matches[1];$s.Deferred+=@([pscustomobject]@{Id=$id;Silent=$false})
+                $s.Seen=@($s.Seen|Where-Object{$_ -ne ('post:'+$id)})
+            }
+        }
+        return $s
     }
-    $s.Seen = @($s.Seen); $s.Pending = @($s.Pending)
+    if($version -ne 2){throw 'Unsupported or corrupt state file. Notification history was not reset.'}
+    $s=New-TiboState
+    foreach($key in @($s.Keys)){
+        if($null -eq $Object.PSObject.Properties[$key] -and !($Object -is [Collections.IDictionary] -and $Object.Contains($key))){throw "State file is missing $key."}
+        $s[$key]=Get-TiboField $Object $key
+    }
+    foreach($key in @('Seen','Pending','Deferred')){$s[$key]=@($s[$key])}
+    if($s.Source -cne 'FxEmbed-v2'){throw 'Unexpected monitoring source in state.'}
     return $s
 }
-
-function Get-TiboTag([string]$Key) {
-    $hash = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($Key)))).Replace('-','').Substring(0,16).ToLowerInvariant() }
-    finally { $hash.Dispose() }
+function New-TiboSystemEvent([string]$Phase,[string]$Episode,[datetimeoffset]$Now) {
+    $key="system:$Phase|$Episode";$title='Tibo 监测已恢复';$text='已重新连接并继续检查主帖和 Tibo 的回复。'
+    if($Phase -eq 'outage'){$title='Tibo 监测暂时不可用';$text='连续 30 分钟无法检查时间线，恢复后会补查。'}
+    return [pscustomobject]@{Key=$key;Tag=(Get-TiboTag $key);Kind='system';Phase=$Phase;Sticky=$false;Title=$title;Text=$text;At=$Now.ToUniversalTime().ToString('o');Url='https://github.com/FxEmbed/FxEmbed';Source='FxEmbed';RootUrl=$null;RootText=$null;Keyword=$null}
 }
-
-function ConvertTo-TiboEvent($Record, [string]$Phase, [datetimeoffset]$Now) {
-    if ($null -eq $Record) { return $null }
-    $source = Get-TiboField $Record 'source'
-    if ((Get-TiboField $source 'type') -cne 'x_post' -or (Get-TiboField $source 'author') -cne 'thsottiaux') { return $null }
-    $uri = $null
-    if (![uri]::TryCreate([string](Get-TiboField $source 'url'),[UriKind]::Absolute,[ref]$uri)) { return $null }
-    if ($uri.Scheme -cne 'https' -or $uri.Host -notin @('x.com','www.x.com','twitter.com','www.twitter.com') -or $uri.UserInfo -or !$uri.IsDefaultPort) { return $null }
-    if ($uri.AbsolutePath -cnotmatch '^/thsottiaux/status/([0-9]+)/?$') { return $null }
-    $url = 'https://x.com/thsottiaux/status/' + $Matches[1]
-    $text = [string](Get-TiboField $Record 'text')
-    if ([string]::IsNullOrWhiteSpace($text)) { throw 'API record is missing announcement text.' }
-    if ($Phase -eq 'signal') {
-        $expires = [datetimeoffset]::Parse([string](Get-TiboField $Record 'expires_at'))
-        if ($expires -le $Now) { return $null }
-        $kind = 'signal'; $at = Get-TiboField $Record 'observed_at'; $title = 'Tibo：额度重置相关信号（待确认）'
-    } else {
-        $kind = [string](Get-TiboField $Record 'reset_type')
-        if ($kind -notin @('regular','banked')) { throw 'Unsupported reset_type in API record.' }
-        $at = Get-TiboField $Record 'announced_at'
-        if ($Phase -eq 'scheduled') { $title = 'Tibo：额度重置预告（待执行）' }
-        elseif ($kind -eq 'banked') { $title = 'Tibo：备用重置消息' }
-        else { $title = 'Tibo：常规额度重置消息' }
-    }
-    $when = [datetimeoffset]::Parse([string]$at)
-    $key = "$url|$kind|$Phase"
-    return [pscustomobject]@{
-        Key=$key; Tag=(Get-TiboTag $key); Kind=$kind; Phase=$Phase
-        Title=$title; Text=$text; At=$when.ToUniversalTime().ToString('o'); Url=$url
-    }
+function Add-TiboPending($State,$Event) {
+    if($State.Seen -contains $Event.Key){return}
+    $State.Seen=@($State.Seen)+@($Event.Key);$State.Pending=@($State.Pending)+@($Event)
 }
-
-function New-TiboSystemEvent([string]$Phase, [string]$Episode, [datetimeoffset]$Now) {
-    $key = "system|$Phase|$Episode"
-    $title = 'Tibo 监测已恢复'; $text = '已重新连接数据源，并继续补查新消息。'
-    if ($Phase -eq 'outage') { $title = 'Tibo 监测暂时不可用'; $text = '连续 30 分钟未能成功检查。恢复连接后会补查；可在插件中查看错误。' }
-    return [pscustomobject]@{Key=$key;Tag=(Get-TiboTag $key);Kind='system';Phase=$Phase;Title=$title;Text=$text;At=$Now.ToUniversalTime().ToString('o');Url='https://codex-resets.com/'}
-}
-
-function Add-TiboPending($State, $Event) {
-    if ($null -eq $Event -or $State.Seen -contains $Event.Key) { return }
-    $State.Seen = @($State.Seen) + @($Event.Key)
-    $State.Pending = @($State.Pending) + @($Event)
-}
-
-function Assert-TiboMeta($Body) {
-    if ((Get-TiboField (Get-TiboField $Body 'meta') 'api_version') -cne 'v1') { throw 'API schema changed: expected meta.api_version v1.' }
-    $generated = Get-TiboField (Get-TiboField $Body 'meta') 'generated_at'
-    if (!$generated) { throw 'API response has no generation time.' }
-    $null = [datetimeoffset]::Parse([string]$generated)
-}
-
 function Invoke-TiboCycle {
-    param([hashtable]$State,[scriptblock]$Fetch,[scriptblock]$Notify,[scriptblock]$Save,[datetimeoffset]$Now = [datetimeoffset]::UtcNow)
-    $State.LastAttemptAt = $Now.ToUniversalTime().ToString('o')
-    $State.LastRunOutcome = 'backoff'
-    if (!$State.NextAttemptAt -or $Now -ge [datetimeoffset]::Parse($State.NextAttemptAt)) {
-        try {
-            $response = & $Fetch 'status' @{} $State.StatusEtag
-            if (Get-TiboField $response 'NotModified') {
-                if ($null -eq $State.CachedStatus) { throw '304 without a cached status response.' }
-                $body = $State.CachedStatus
-            } else { $body = Get-TiboField $response 'Body' }
-            Assert-TiboMeta $body
-            $data = Get-TiboField $body 'data'
-            foreach ($required in @('latest_reset','scheduled_reset','active_watch','stats')) {
-                if ($null -eq $data -or ($null -eq $data.PSObject.Properties[$required] -and !($data -is [System.Collections.IDictionary] -and $data.Contains($required)))) { throw "API status missing $required." }
+    param([hashtable]$State,[scriptblock]$Fetch,[scriptblock]$Notify,[scriptblock]$Save,[datetimeoffset]$Now=[datetimeoffset]::UtcNow)
+    $State.LastAttemptAt=$Now.ToUniversalTime().ToString('o');$State.LastRunOutcome='backoff'
+    if(!$State.NextAttemptAt -or $Now -ge [datetimeoffset]::Parse($State.NextAttemptAt)){
+        try{
+            $snapshot=& $Fetch $State $Now
+            foreach($key in @('Events','ObservedIds','Deferred')){if((Get-TiboField $snapshot $key) -isnot [Array]){throw "Invalid thread snapshot: $key must be an array."}}
+            $wasBaseline=$State.BaselineComplete
+            foreach($event in @($snapshot.Events|Sort-Object At,Key)){
+                $owed=(Get-TiboField $event 'DeferredCarry') -and !(Get-TiboField $event 'Silent')
+                if(($wasBaseline -or $owed) -and !(Get-TiboField $event 'Silent')){Add-TiboPending $State $event}
+                elseif($State.Seen -notcontains $event.Key){$State.Seen+=@($event.Key)}
+                $State.LastMatchedPost=$event
             }
-            $events = New-Object 'System.Collections.Generic.List[object]'
-            foreach ($pair in @(@('latest_reset','recorded'),@('scheduled_reset','scheduled'),@('active_watch','signal'))) {
-                $record = Get-TiboField $data $pair[0]
-                if ($null -ne $record) {
-                    $ev = ConvertTo-TiboEvent $record $pair[1] $Now
-                    if ($null -ne $ev) { $events.Add($ev) }
-                }
+            $deferredIds=@($snapshot.Deferred|ForEach-Object{[string]$_.Id})
+            foreach($id in $snapshot.ObservedIds){
+                $key='post:'+$id
+                if($deferredIds -notcontains [string]$id -and $State.Seen -notcontains $key){$State.Seen+=@($key)}
             }
-            $cursor = $null; $visited = @{}
-            do {
-                $query = @{limit=100;order='desc'}
-                if ($cursor) { $query.cursor=$cursor }
-                $history = & $Fetch 'resets' $query $null
-                $page = Get-TiboField $history 'Body'
-                Assert-TiboMeta $page
-                $items = Get-TiboField $page 'data'; $pagination = Get-TiboField $page 'pagination'
-                $hasMore = Get-TiboField $pagination 'has_more'
-                if ($null -eq $items -or $items -isnot [System.Array] -or $hasMore -isnot [bool]) { throw 'API history schema changed: expected array and pagination.has_more.' }
-                foreach ($record in $items) {
-                    $ev = ConvertTo-TiboEvent $record 'recorded' $Now
-                    if ($null -ne $ev) { $events.Add($ev) }
-                }
-                $cursor = Get-TiboField $pagination 'next_cursor'
-                if ($hasMore) {
-                    if (!$cursor -or [string]$cursor -cnotmatch '^[A-Za-z0-9_-]{1,1024}$' -or $visited.ContainsKey($cursor)) { throw 'Invalid or repeated history cursor.' }
-                    $visited[$cursor]=$true
-                }
-            } while ($hasMore)
-            # Commit only after the complete paginated snapshot succeeds.
-            foreach ($ev in @($events | Sort-Object At,Key)) {
-                if (!$State.BaselineComplete) {
-                    if ($State.Seen -notcontains $ev.Key) { $State.Seen = @($State.Seen) + @($ev.Key) }
-                } else { Add-TiboPending $State $ev }
-            }
-            if (!$State.BaselineComplete) { $State.BaselineAt=$Now.ToUniversalTime().ToString('o'); $State.BaselineComplete=$true }
-            if ($State.OutageAlerted) { Add-TiboPending $State (New-TiboSystemEvent 'recovery' $State.FailureSince $Now) }
-            $State.LastSuccessfulCheck=$Now.ToUniversalTime().ToString('o')
-            $State.LastDataGeneratedAt=Get-TiboField (Get-TiboField $body 'meta') 'generated_at'
-            $State.CachedStatus=$body
-            if (!(Get-TiboField $response 'NotModified')) { $State.StatusEtag=Get-TiboField $response 'ETag' }
-            $State.FailureSince=$null; $State.OutageAlerted=$false; $State.NextAttemptAt=$null; $State.LastError=$null
-            $State.LastRunOutcome='ok'
-        } catch {
-            $State.LastRunOutcome='error'; $State.LastError=$_.Exception.Message
-            if (!$State.FailureSince) { $State.FailureSince=$Now.ToUniversalTime().ToString('o') }
-            if ($_.Exception.Data.Contains('RetryAfterUtc')) { $State.NextAttemptAt=[string]$_.Exception.Data['RetryAfterUtc'] }
+            $State.Deferred=@($snapshot.Deferred);$State.LastContextError=Get-TiboField $snapshot 'ContextError'
+            if(!$wasBaseline){$State.BaselineComplete=$true;$State.BaselineAt=$Now.ToUniversalTime().ToString('o')}
+            if($State.OutageAlerted){Add-TiboPending $State (New-TiboSystemEvent 'recovery' $State.FailureSince $Now)}
+            $State.LastSuccessfulCheck=$Now.ToUniversalTime().ToString('o');$State.LastDataGeneratedAt=$State.LastSuccessfulCheck
+            $State.FailureSince=$null;$State.OutageAlerted=$false;$State.NextAttemptAt=$null;$State.LastError=$null
+            $State.LastRunOutcome=$(if($State.Deferred.Count){'partial'}else{'ok'})
+        }catch{
+            $State.LastRunOutcome='error';$State.LastError=$_.Exception.Message
+            if(!$State.FailureSince){$State.FailureSince=$Now.ToUniversalTime().ToString('o')}
+            if($_.Exception.Data.Contains('RetryAfterUtc')){$State.NextAttemptAt=[string]$_.Exception.Data['RetryAfterUtc']}
         }
     }
-    if ($State.FailureSince -and !$State.OutageAlerted -and ($Now - [datetimeoffset]::Parse($State.FailureSince)).TotalMinutes -ge 30) {
-        Add-TiboPending $State (New-TiboSystemEvent 'outage' $State.FailureSince $Now)
-        $State.OutageAlerted=$true
+    if($State.FailureSince -and !$State.OutageAlerted -and ($Now-[datetimeoffset]::Parse($State.FailureSince)).TotalMinutes -ge 30){
+        Add-TiboPending $State (New-TiboSystemEvent 'outage' $State.FailureSince $Now);$State.OutageAlerted=$true
     }
-    # Persist outbox before any OS side effect. Stable toast tags replace crash retries.
     & $Save $State
     $State.LastNotificationError=$null
-    foreach ($event in @($State.Pending)) {
-        try { & $Notify $event }
-        catch { $State.LastNotificationError=$_.Exception.Message; & $Save $State; break }
-        $State.Pending=@($State.Pending | Where-Object { $_.Key -ne $event.Key })
-        & $Save $State
+    foreach($event in @($State.Pending)){
+        try{& $Notify $event}catch{$State.LastNotificationError=$_.Exception.Message;& $Save $State;break}
+        $State.Pending=@($State.Pending|Where-Object{$_.Key -ne $event.Key});& $Save $State
     }
 }
-
-function New-TiboToastXml($Event) {
-    $url=[string]$Event.Url
-    if ($Event.Kind -ne 'system') {
-        $uri=$null
-        if (![uri]::TryCreate($url,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -cne 'https' -or $uri.Host -cne 'x.com' -or $uri.AbsolutePath -cnotmatch '^/thsottiaux/status/[0-9]+$' -or $uri.UserInfo -or !$uri.IsDefaultPort) { throw 'Refusing unsafe notification launch URL.' }
-    } elseif ($url -cne 'https://codex-resets.com/') { throw 'Unexpected system notification URL.' }
-    # XML 1.0 cannot represent control characters or unpaired UTF-16 surrogates.
+function ConvertTo-TiboXmlText([string]$Text,[int]$Limit=220) {
     $invalid='[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]'
-    $title=[Security.SecurityElement]::Escape(([string]$Event.Title -replace $invalid,''))
-    $text=(([string]$Event.Text -replace $invalid,'') -replace '\s+',' ').Trim()
-    if ($text.Length -gt 220) {
-        $length=217
-        if ([char]::IsHighSurrogate($text[$length-1])) { $length-- }
-        $text=$text.Substring(0,$length)+'...'
-    }
-    $text=[Security.SecurityElement]::Escape($text)
-    $time=([datetimeoffset]::Parse([string]$Event.At)).ToOffset([timespan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm')
-    $footer=[Security.SecurityElement]::Escape("北京时间 $time；适用范围以原帖为准。来源：Codex Resets（社区转述）")
-    $url=[Security.SecurityElement]::Escape($url)
-    return "<toast activationType=`"protocol`" launch=`"$url`"><visual><binding template=`"ToastGeneric`"><text>$title</text><text>$text</text><text>$footer</text></binding></visual><actions><action content=`"数据来源：Codex Resets`" activationType=`"protocol`" arguments=`"https://codex-resets.com/`" /></actions></toast>"
+    $text=(($Text -replace $invalid,'') -replace '\s+',' ').Trim()
+    if($text.Length -gt $Limit){$n=$Limit-3;if([char]::IsHighSurrogate($text[$n-1])){$n--};$text=$text.Substring(0,$n)+'...'}
+    return [Security.SecurityElement]::Escape($text)
 }
-
-Export-ModuleMember -Function New-TiboState,ConvertTo-TiboState,Get-TiboField,ConvertTo-TiboEvent,Invoke-TiboCycle,New-TiboToastXml,Get-TiboTag
+function Test-TiboPostUrl([string]$Url,[bool]$OnlyTibo=$true) {
+    $uri=$null
+    if(![uri]::TryCreate($Url,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -cne 'https' -or $uri.Host -cne 'x.com' -or $uri.UserInfo -or !$uri.IsDefaultPort -or $uri.Query -or $uri.Fragment){return $false}
+    if($OnlyTibo){return $uri.AbsolutePath -cmatch '^/thsottiaux/status/[0-9]+$'}
+    return $uri.AbsolutePath -match '^/[A-Za-z0-9_]{1,15}/status/[0-9]+$'
+}
+function New-TiboToastXml($Event) {
+    $url=[string]$Event.Url;$sticky=[bool](Get-TiboField $Event 'Sticky')
+    if($Event.Kind -eq 'system'){
+        if($url -cne 'https://github.com/FxEmbed/FxEmbed'){throw 'Unexpected system notification URL.'}
+        $sticky=$false
+    }elseif(!(Test-TiboPostUrl $url)){throw 'Refusing unsafe notification launch URL.'}
+    $title=ConvertTo-TiboXmlText $Event.Title 100;$text=ConvertTo-TiboXmlText $Event.Text
+    $time=([datetimeoffset]::Parse([string]$Event.At)).ToOffset([timespan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm')
+    $footer=ConvertTo-TiboXmlText "北京时间 $time；来源 FxEmbed。关键词提醒，不代表个人额度到账。" 180
+    $actions='<action content="数据来源：FxEmbed" activationType="protocol" arguments="https://github.com/FxEmbed/FxEmbed" />'
+    $rootUrl=Get-TiboField $Event 'RootUrl'
+    if($rootUrl){
+        if(!(Test-TiboPostUrl $rootUrl $false)){throw 'Refusing unsafe root-post URL.'}
+        $rootUrl=[Security.SecurityElement]::Escape($rootUrl)
+        $actions='<action content="查看主帖" activationType="protocol" arguments="'+$rootUrl+'" />'+$actions
+    }
+    $scenario=''
+    if($sticky){
+        # Alarm + silent audio persists without a background COM toast activator.
+        $scenario=' scenario="alarm"';$actions='<action content="知道了" activationType="system" arguments="dismiss" />'+$actions
+    }
+    $url=[Security.SecurityElement]::Escape($url)
+    return '<toast activationType="protocol" launch="'+$url+'"'+$scenario+'><visual><binding template="ToastGeneric"><text>'+$title+'</text><text>'+$text+'</text><text>'+$footer+'</text></binding></visual><audio silent="true"/><actions>'+$actions+'</actions></toast>'
+}
+Export-ModuleMember -Function Get-TiboField,Get-TiboTag,New-TiboState,ConvertTo-TiboState,Invoke-TiboCycle,New-TiboToastXml,Test-TiboPostUrl

@@ -27,23 +27,23 @@ function Get-TiboRetryTime([string]$Value,[datetimeoffset]$Now = [datetimeoffset
     return $Now.AddMinutes(5).ToUniversalTime().ToString('o')
 }
 
-function Invoke-TiboRequest([string]$Path,[hashtable]$Query,[string]$ETag) {
-    if ($Path -notin @('status','resets')) { throw 'Unsupported API path.' }
-    $uri='https://codex-resets.com/api/v1/'+$Path
+function Invoke-TiboFxRequest([string]$Path,[hashtable]$Query) {
+    if($Path -eq 'timeline'){$uri='https://api.fxtwitter.com/2/profile/thsottiaux/statuses'}
+    elseif($Path -eq 'thread' -and [string]$Query.id -cmatch '^[0-9]{2,20}$'){$uri='https://api.fxtwitter.com/2/status/'+$Query.id}
+    else{throw 'Unsupported FxEmbed request path or post ID.'}
+    $parameters=@{};foreach($key in $Query.Keys){if($key -ne 'id'){$parameters[$key]=$Query[$key]}}
+    $Query=$parameters
     if ($Query.Count) {
         $pairs=foreach($key in @($Query.Keys | Sort-Object)){[uri]::EscapeDataString($key)+'='+[uri]::EscapeDataString([string]$Query[$key])}
         $uri+='?'+($pairs -join '&')
     }
     $headers=@{Accept='application/json'}
-    if ($ETag) { $headers['If-None-Match']=$ETag }
     [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     try {
-        $r=Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent 'TiboResetWatch/1.0 (personal; 15 minute polling)' -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 0 -ErrorAction Stop
-        if ([int]$r.StatusCode -eq 304) { return @{NotModified=$true} }
-        return @{NotModified=$false;Body=($r.Content | ConvertFrom-Json -ErrorAction Stop);ETag=[string]$r.Headers['ETag']}
+        $r=Invoke-WebRequest -Uri $uri -Headers $headers -UserAgent 'TiboResetWatch/1.1 (personal; 15 minute polling; github.com/RGFishLit/tibo-reset-watch)' -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 0 -ErrorAction Stop
+        return ($r.Content | ConvertFrom-Json -ErrorAction Stop)
     } catch {
-        $response=$_.Exception.Response
-        if ($null -ne $response -and [int]$response.StatusCode -eq 304) { return @{NotModified=$true} }
+        $response=Get-TiboField $_.Exception 'Response'
         if ($null -ne $response -and [int]$response.StatusCode -eq 429) {
             $ex=New-Object System.Exception 'HTTP 429: the data source requested a pause.'
             $ex.Data['RetryAfterUtc']=Get-TiboRetryTime ([string]$response.Headers['Retry-After'])
@@ -70,6 +70,10 @@ namespace TiboWatch {
   public static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint count, uint flags);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   public static extern bool MoveFileEx(string source, string destination, uint flags);
+  [DllImport("user32.dll", SetLastError=true)]
+  public static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll", SetLastError=true)]
+  public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
  }
 }
 '@
@@ -110,7 +114,60 @@ function Register-TiboToastIdentity {
     }
 }
 
-function Show-TiboToast($Event,[string]$AppId) {
+function Get-TiboActivePopup([string]$AckFile) {
+    if(!(Test-Path -LiteralPath $AckFile)){return $null}
+    try{
+        $ack=Get-Content -LiteralPath $AckFile -Raw -Encoding UTF8|ConvertFrom-Json
+        $process=Get-Process -Id ([int]$ack.ProcessId) -ErrorAction Stop
+        Initialize-TiboNativePaths
+        $ownerId=[uint32]0;$handle=[intptr][long]$ack.WindowHandle
+        $null=[TiboWatch.NativePaths]::GetWindowThreadProcessId($handle,[ref]$ownerId)
+        if($process.StartTime.ToUniversalTime().Ticks -eq [long]$ack.StartTicks -and $ownerId -eq [uint32]$ack.ProcessId -and [TiboWatch.NativePaths]::IsWindowVisible($handle)){return $ack}
+    }catch{}
+    return $null
+}
+
+function Get-TiboClosedPopup([string]$Path,[string]$Key) {
+    if(!(Test-Path -LiteralPath $Path)){return $null}
+    try{$receipt=Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json;if($receipt.Closed -eq $true -and $receipt.Key -ceq $Key){return $receipt}}catch{}
+    return $null
+}
+
+function Show-TiboPersistentPopup($Event,[string]$DataDirectory,[ValidateRange(100,30000)][int]$WaitMilliseconds=15000) {
+    if([string]$Event.Tag -cnotmatch '^(?:[a-f0-9]{16}|tibotest)$'){throw 'Unsafe popup tag.'}
+    $null=New-TiboToastXml $Event
+    $folder=Join-Path $DataDirectory 'popups';$null=New-Item -ItemType Directory -Path $folder -Force
+    $message=Join-Path $folder ($Event.Tag+'.json');$ackPath=$message+'.shown.json';$closedPath=$message+'.closed.json'
+    $ack=Get-TiboActivePopup $ackPath;if($ack){return $ack}
+    if($Event.Tag -cne 'tibotest'){$closed=Get-TiboClosedPopup $closedPath $Event.Key;if($closed){return $closed}}
+    elseif(Test-Path -LiteralPath $closedPath){Remove-Item -LiteralPath $closedPath -Force}
+    [IO.File]::WriteAllText($message,($Event|ConvertTo-Json -Depth 12),(New-Object Text.UTF8Encoding $false))
+    $helper=Join-Path $PSScriptRoot 'Show-TiboPopup.ps1'
+    $arguments='-NoLogo -NoProfile -NonInteractive -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$helper+'" -MessageFile "'+$message+'"'
+    $process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    while($clock.ElapsedMilliseconds -lt $WaitMilliseconds){
+        $ack=Get-TiboActivePopup $ackPath;if($ack){return $ack}
+        $closed=Get-TiboClosedPopup $closedPath $Event.Key;if($closed){return $closed}
+        if($process.HasExited){$closed=Get-TiboClosedPopup $closedPath $Event.Key;if($closed){return $closed};throw 'Persistent popup process exited before showing its window.'}
+        Start-Sleep -Milliseconds 100
+    }
+    $ack=Get-TiboActivePopup $ackPath;if($ack){return $ack}
+    $closed=Get-TiboClosedPopup $closedPath $Event.Key;if($closed){return $closed}
+    # Failure must not leave our cold-starting child able to display a late popup.
+    if(!$process.HasExited){$process.Kill();$null=$process.WaitForExit(3000)}
+    throw 'Persistent popup did not acknowledge a visible window; notification remains queued.'
+}
+
+function Close-TiboPersistentPopups([string]$DataDirectory) {
+    $folder=Join-Path $DataDirectory 'popups';if(!(Test-Path -LiteralPath $folder)){return}
+    foreach($file in Get-ChildItem -LiteralPath $folder -Filter '*.shown.json' -File){
+        $ack=Get-TiboActivePopup $file.FullName
+        if($ack){$process=Get-Process -Id ([int]$ack.ProcessId) -ErrorAction SilentlyContinue;if($process){$null=$process.CloseMainWindow()}}
+    }
+}
+
+function Show-TiboToast($Event,[string]$AppId,[string]$DataDirectory=(Join-Path $env:LOCALAPPDATA 'TiboResetWatch')) {
     Register-TiboToastIdentity
     $null=[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]
     $null=[Windows.UI.Notifications.NotificationSetting,Windows.UI.Notifications,ContentType=WindowsRuntime]
@@ -124,9 +181,11 @@ function Show-TiboToast($Event,[string]$AppId) {
     $xml.LoadXml((New-TiboToastXml $Event))
     $toast=[Windows.UI.Notifications.ToastNotification]::new($xml)
     $toast.Tag=[string]$Event.Tag; $toast.Group='TiboResetWatch'
-    $toast.ExpirationTime=[datetimeoffset]::UtcNow.AddDays(3)
+    if(Get-TiboField $Event 'Sticky'){$toast.SuppressPopup=$true}
+    if(!(Get-TiboField $Event 'Sticky')){$toast.ExpirationTime=[datetimeoffset]::UtcNow.AddDays(3)}
     $notifier.Show($toast)
     if([string]$notifier.get_Setting() -ne 'Enabled'){throw 'Windows did not enable notification delivery.'}
+    if(Get-TiboField $Event 'Sticky'){$null=Show-TiboPersistentPopup $Event $DataDirectory}
 }
 
 function Unregister-TiboToastIdentity {
@@ -151,7 +210,7 @@ function New-TiboTaskXml([string]$ScriptPath,[string]$UserSid,[datetimeoffset]$N
     return @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
- <RegistrationInfo><Description>Tibo 额度重置提醒：每 15 分钟检查 Codex Resets 社区接口。</Description></RegistrationInfo>
+ <RegistrationInfo><Description>Tibo 额度重置提醒：每 15 分钟检查本人发帖和回复；主帖命中关键词才常驻提醒。</Description></RegistrationInfo>
  <Triggers>
   <TimeTrigger><Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>$start</StartBoundary><Enabled>true</Enabled></TimeTrigger>
   <LogonTrigger><Enabled>true</Enabled><UserId>$sid</UserId><Delay>PT15S</Delay></LogonTrigger>
@@ -163,4 +222,4 @@ function New-TiboTaskXml([string]$ScriptPath,[string]$UserSid,[datetimeoffset]$N
 "@
 }
 
-Export-ModuleMember -Function Read-TiboState,Save-TiboState,Get-TiboRetryTime,Invoke-TiboRequest,Get-TiboAppId,Show-TiboToast,New-TiboTaskXml,Resolve-TiboPhysicalPath,Register-TiboToastIdentity,Unregister-TiboToastIdentity
+Export-ModuleMember -Function Read-TiboState,Save-TiboState,Get-TiboRetryTime,Invoke-TiboFxRequest,Get-TiboAppId,Show-TiboToast,Show-TiboPersistentPopup,Close-TiboPersistentPopups,New-TiboTaskXml,Resolve-TiboPhysicalPath,Register-TiboToastIdentity,Unregister-TiboToastIdentity
